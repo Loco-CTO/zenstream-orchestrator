@@ -54,6 +54,7 @@ class FakeStreamEvent:
     text: str | None = None
     turn: object | None = None
     reason: str | None = None
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,148 @@ class FakeConversation:
 
 
 class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def test_conversation_detail_returns_first_page_and_owner_bound_cursor(self):
+        class DetailService:
+            async def get_conversation_for_account(self, account_id, conversation_id):
+                self.scope = (account_id, conversation_id)
+                return SimpleNamespace(
+                    conversation=FakeConversation(
+                        id=conversation_id,
+                        title="Chat",
+                        model="qwen3.5:2b",
+                        thinking=False,
+                        created_at="2026-01-01T12:00:00Z",
+                        updated_at="2026-01-01T12:01:00Z",
+                    ),
+                    messages=(
+                        SimpleNamespace(
+                            id="message-10",
+                            ordinal=10,
+                            role="assistant",
+                            content="Newest message",
+                            created_at="2026-01-01T12:01:00Z",
+                        ),
+                    ),
+                    has_older_messages=True,
+                    summary="Older history was summarized.",
+                )
+
+        service = DetailService()
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            patch.object(lumi_routes, "_service", return_value=service),
+        ):
+            response = await lumi_routes.lumi_conversation(None, "conversation-1")
+
+        payload = json.loads(response.body)
+        cursor = lumi_routes._decode_message_cursor(
+            payload["nextCursor"], "trusted-account", "conversation-1"
+        )
+        self.assertEqual(service.scope, ("trusted-account", "conversation-1"))
+        self.assertEqual(cursor, 10)
+        self.assertTrue(payload["hasMore"])
+        self.assertTrue(payload["hasSummary"])
+        self.assertEqual([item["id"] for item in payload["messages"]], ["message-10"])
+
+    async def test_conversation_detail_cursor_loads_one_page_and_rejects_cross_scope(self):
+        class DetailService:
+            async def get_conversation_for_account(self, account_id, conversation_id):
+                return SimpleNamespace(
+                    conversation=FakeConversation(
+                        id=conversation_id,
+                        title="Chat",
+                        model="qwen3.5:2b",
+                        thinking=False,
+                        created_at="2026-01-01T12:00:00Z",
+                        updated_at="2026-01-01T12:01:00Z",
+                    ),
+                    messages=(),
+                    has_older_messages=False,
+                    summary=None,
+                )
+
+            async def get_message_page_for_account(
+                self, account_id, conversation_id, *, before_ordinal
+            ):
+                self.call = (account_id, conversation_id, before_ordinal)
+                return SimpleNamespace(
+                    messages=(
+                        SimpleNamespace(
+                            id="message-1",
+                            role="user",
+                            content="Earlier message",
+                            created_at="2026-01-01T11:00:00Z",
+                        ),
+                    ),
+                    has_more=False,
+                    next_before_ordinal=None,
+                )
+
+        service = DetailService()
+        cursor = lumi_routes._encode_message_cursor(
+            "trusted-account", "conversation-1", 10
+        )
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            patch.object(lumi_routes, "_service", return_value=service),
+        ):
+            response = await lumi_routes.lumi_conversation(
+                None, "conversation-1", cursor=cursor
+            )
+
+            with self.assertRaises(lumi_routes.HTTPException) as error:
+                await lumi_routes.lumi_conversation(
+                    None,
+                    "another-conversation",
+                    cursor=cursor,
+                )
+
+        payload = json.loads(response.body)
+        self.assertEqual(service.call, ("trusted-account", "conversation-1", 10))
+        self.assertFalse(payload["hasMore"])
+        self.assertIsNone(payload["nextCursor"])
+        self.assertEqual(payload["messages"][0]["id"], "message-1")
+        self.assertEqual(error.exception.status_code, 400)
+
+    async def test_legacy_snapshot_without_pagination_fields_remains_readable(self):
+        service = SimpleNamespace(
+            get_conversation_for_account=AsyncMock(
+                return_value=SimpleNamespace(
+                    conversation=FakeConversation(
+                        id="conversation-1",
+                        title="Legacy chat",
+                        model="qwen3.5:2b",
+                        thinking=False,
+                        created_at="2026-01-01T12:00:00Z",
+                        updated_at="2026-01-01T12:01:00Z",
+                    ),
+                    messages=(),
+                )
+            )
+        )
+        with (
+            patch.object(
+                lumi_routes,
+                "_account",
+                new=AsyncMock(return_value={"id": "trusted-account"}),
+            ),
+            patch.object(lumi_routes, "_service", return_value=service),
+        ):
+            response = await lumi_routes.lumi_conversation(None, "conversation-1")
+
+        payload = json.loads(response.body)
+        self.assertFalse(payload["hasMore"])
+        self.assertFalse(payload["hasSummary"])
+        self.assertIsNone(payload["nextCursor"])
+
     async def test_stream_turn_relays_visible_deltas_then_one_complete_event(self):
         turn = FakeTurn(
             FakeConversation(
@@ -117,6 +260,10 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         service = StreamingFakeLumiService(
             [
+                FakeStreamEvent("status", status="context_expansion"),
+                FakeStreamEvent("status", status="summarization"),
+                FakeStreamEvent("status", status="generation"),
+                FakeStreamEvent("status", status="private_reasoning"),
                 FakeStreamEvent("delta", text="Hello "),
                 FakeStreamEvent("tool_call", text="private tool arguments"),
                 FakeStreamEvent("delta", text="**there**"),
@@ -147,6 +294,14 @@ class LumiRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(response.headers["x-accel-buffering"], "no")
         self.assertEqual(body.count("event: delta"), 2)
+        self.assertIn(
+            'event: status\ndata: {"stage":"context_expansion"}\n\n', body
+        )
+        self.assertIn(
+            'event: status\ndata: {"stage":"summarization"}\n\n', body
+        )
+        self.assertIn('event: status\ndata: {"stage":"generation"}\n\n', body)
+        self.assertNotIn("private_reasoning", body)
         self.assertEqual(body.count("event: complete"), 1)
         self.assertNotIn("private tool arguments", body)
         self.assertIn('"markdown":"Hello **there**"', body)

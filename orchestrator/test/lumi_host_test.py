@@ -71,6 +71,75 @@ class FakeReleaseManager:
 
 
 class LumiHostTests(unittest.IsolatedAsyncioTestCase):
+    def test_context_management_status_reads_cached_state_without_inference(self):
+        capabilities = {
+            "token_counting",
+            "context_capacity",
+            "completion_reasons",
+            "status_events",
+        }
+        runtime_module = SimpleNamespace(LUMI_RUNTIME_CAPABILITIES=capabilities)
+        runtime = Mock()
+        runtime.context_status.return_value = {
+            "allocatedContextTokens": 32_768,
+            "verifiedMaximumContextTokens": 262_144,
+            "growthCeilingContextTokens": 65_536,
+            "memoryGrowthCeilingContextTokens": 48_000,
+            "growthState": "limited",
+        }
+        service = Mock()
+        service.context_management_status.return_value = {
+            "compactionState": "summarizing"
+        }
+        host = LumiHost(data_directory=".")
+        host._loaded_release = SimpleNamespace(runtime_module=runtime_module)
+        host._runtime = runtime
+        host._service = service
+
+        status = host._context_management_status()
+
+        self.assertEqual(status["allocatedContextTokens"], 32_768)
+        self.assertEqual(status["verifiedMaximumContextTokens"], 262_144)
+        self.assertEqual(status["growthCeilingContextTokens"], 65_536)
+        self.assertEqual(status["memoryGrowthCeilingContextTokens"], 48_000)
+        self.assertEqual(status["growthState"], "limited")
+        self.assertEqual(status["compactionState"], "summarizing")
+        runtime.context_status.assert_called_once_with()
+        runtime.ensure_context_capacity.assert_not_called()
+        runtime.complete.assert_not_called()
+
+    def test_schema_one_settings_enable_automatic_modes_and_keep_manual_numbers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lumi" / "integration.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "enabled": False,
+                        "releaseTag": "v0.3.10",
+                        "limits": {
+                            "idleUnloadSeconds": 120,
+                            "maxContextTokens": 16_384,
+                            "maxOutputTokens": 3_072,
+                            "maxConcurrentChats": 2,
+                            "maxActiveConversations": 96,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            host = LumiHost(data_directory=directory)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(host.model_settings()["limits"]["contextMode"], "automatic")
+        self.assertEqual(host.model_settings()["limits"]["outputMode"], "automatic")
+        self.assertEqual(host.model_settings()["limits"]["turnTimeoutMinutes"], 30)
+        self.assertEqual(host.model_settings()["limits"]["maxContextTokens"], 16_384)
+        self.assertEqual(host.model_settings()["limits"]["maxOutputTokens"], 3_072)
+        self.assertEqual(saved["schemaVersion"], 2)
+
     def test_download_cancellation_is_only_enabled_for_compatible_releases(self):
         class CancellableInstaller:
             def install_model(self, _model_id, *, progress=None, cancel_event=None):
@@ -285,6 +354,7 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
                 "idle_unload_seconds": 300,
                 "max_context_tokens": 8192,
                 "max_output_tokens": 2048,
+                "n_ctx": 8192,
                 "acceleration_mode": "automatic",
             },
         )
@@ -361,6 +431,56 @@ class LumiHostTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(runtime.configuration.backend, "llama-cpp-python")
+
+    def test_capable_runtime_uses_automatic_context_start_and_deadline(self):
+        class Config:
+            def __init__(self, **values):
+                self.values = values
+
+        class Runtime:
+            def __init__(self, configuration):
+                self.configuration = configuration
+
+        module = SimpleNamespace(
+            LlamaCppConfig=Config,
+            LlamaCppChatRuntime=Runtime,
+            LUMI_RUNTIME_CAPABILITIES={
+                "token_counting",
+                "context_capacity",
+                "completion_reasons",
+                "status_events",
+            },
+        )
+        limits = {
+            "idleUnloadSeconds": 300,
+            "contextMode": "automatic",
+            "outputMode": "automatic",
+            "turnTimeoutMinutes": 30,
+            "maxContextTokens": 8_192,
+            "maxOutputTokens": 2_048,
+            "maxConcurrentChats": 1,
+            "maxActiveConversations": 128,
+        }
+
+        runtime = _create_runtime_adapter(module, {}, limits, "llama-cpp-python")
+
+        self.assertEqual(runtime.configuration.values["n_ctx"], 32_768)
+        self.assertEqual(runtime.configuration.values["max_context_tokens"], 262_144)
+        self.assertEqual(runtime.configuration.values["max_output_tokens"], 8_192)
+
+        class AgentLimits:
+            def __init__(self, **values):
+                self.values = values
+
+        agent_limits = _create_agent_limits(
+            SimpleNamespace(AgentLimits=AgentLimits),
+            limits,
+            automatic_context_supported=True,
+        )
+        self.assertEqual(agent_limits.values["context_size"], 32_768)
+        self.assertEqual(agent_limits.values["context_mode"], "automatic")
+        self.assertEqual(agent_limits.values["output_mode"], "automatic")
+        self.assertEqual(agent_limits.values["turn_timeout_seconds"], 1_800)
 
     def test_agent_limits_apply_saved_context_and_output_values(self):
         class AgentLimits:

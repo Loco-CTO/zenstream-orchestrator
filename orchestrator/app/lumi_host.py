@@ -37,11 +37,19 @@ logger = logging.getLogger("zenstream.lumi")
 _STABLE_RELEASE_TAG = re.compile(r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$")
 _DEFAULT_LIMITS = {
     "idleUnloadSeconds": 300,
+    "contextMode": "automatic",
+    "outputMode": "automatic",
+    "turnTimeoutMinutes": 30,
     "maxContextTokens": 8192,
     "maxOutputTokens": 2048,
     "maxConcurrentChats": 1,
     "maxActiveConversations": 128,
 }
+_AUTO_CONTEXT_CAPABILITIES = frozenset(
+    {"token_counting", "context_capacity", "completion_reasons", "status_events"}
+)
+_AUTO_CONTEXT_MAX_TOKENS = 262_144
+_AUTO_CONTEXT_START_TOKENS = 32_768
 _GPU_MODES = {"automatic", "cpu_only", "gpu_preferred"}
 _MODEL_INTEGRITY_ERROR = (
     "Model files failed integrity verification. Delete and reinstall this model."
@@ -86,6 +94,24 @@ def _runtime_supports_acceleration(runtime_module: Any) -> bool:
     )
 
 
+def _runtime_supports_automatic_context(runtime_module: Any) -> bool:
+    capabilities = getattr(runtime_module, "LUMI_RUNTIME_CAPABILITIES", ())
+    if not isinstance(capabilities, (set, frozenset, tuple, list)):
+        return False
+    return _AUTO_CONTEXT_CAPABILITIES <= set(capabilities)
+
+
+def _config_supports_field(config_type: Any, name: str) -> bool:
+    try:
+        parameters = inspect.signature(config_type).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
+
+
 def _supports_model_download_cancellation(package_module: Any) -> bool:
     """Return whether the selected Lumi release accepts cooperative cancellation."""
     installer_type = getattr(package_module, "Qwen35ModelInstaller", None)
@@ -119,29 +145,67 @@ def _create_runtime_adapter(
             "The selected Lumi release does not expose its declared local runtime."
         )
     supports_acceleration = _runtime_supports_acceleration(runtime_module)
+    supports_automatic_context = _runtime_supports_automatic_context(runtime_module)
+    automatic_context = (
+        supports_automatic_context and limits.get("contextMode") == "automatic"
+    )
     if not isinstance(acceleration_mode, str) or acceleration_mode not in _GPU_MODES:
         raise LumiHostError("The Lumi GPU acceleration mode is invalid.")
     config_values = dict(
         model_artifacts=artifacts,
         idle_unload_seconds=limits["idleUnloadSeconds"],
-        max_context_tokens=limits["maxContextTokens"],
-        max_output_tokens=limits["maxOutputTokens"],
+        max_context_tokens=(
+            _AUTO_CONTEXT_MAX_TOKENS
+            if automatic_context
+            else limits["maxContextTokens"]
+        ),
+        # The saved number remains the agent's manual-mode limit. Keep the
+        # compatible runtime cap high enough for bounded rolling summaries.
+        max_output_tokens=(
+            8_192 if supports_automatic_context else limits["maxOutputTokens"]
+        ),
     )
+    if _config_supports_field(config_type, "n_ctx"):
+        config_values["n_ctx"] = (
+            _AUTO_CONTEXT_START_TOKENS
+            if automatic_context
+            else limits["maxContextTokens"]
+        )
     if supports_acceleration:
         config_values["acceleration_mode"] = acceleration_mode
     configuration = config_type(**config_values)
     return runtime_type(configuration)
 
 
-def _create_agent_limits(agent_module, limits):
+def _create_agent_limits(agent_module, limits, *, automatic_context_supported=False):
     """Apply Orchestrator's saved context and output bounds to Lumi's agent."""
     limits_type = getattr(agent_module, "AgentLimits", None)
     if not callable(limits_type):
         raise LumiHostError("The selected Lumi release does not expose agent limits.")
-    return limits_type(
-        context_size=limits["maxContextTokens"],
-        output_tokens=limits["maxOutputTokens"],
-    )
+    values = {
+        "context_size": (
+            _AUTO_CONTEXT_START_TOKENS
+            if automatic_context_supported and limits.get("contextMode") == "automatic"
+            else limits["maxContextTokens"]
+        ),
+        "output_tokens": limits["maxOutputTokens"],
+    }
+    if automatic_context_supported:
+        values.update(
+            context_mode=limits.get("contextMode", "manual"),
+            output_mode=limits.get("outputMode", "manual"),
+            turn_timeout_seconds=limits.get("turnTimeoutMinutes", 30) * 60,
+        )
+    try:
+        parameters = inspect.signature(limits_type).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if parameters and not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    ):
+        values = {key: value for key, value in values.items() if key in parameters}
+    return limits_type(**values)
 
 
 class LumiHostError(RuntimeError):
@@ -178,6 +242,8 @@ class LumiHost:
         self._lock = asyncio.Lock()
         self._disable_requested = False
         self._settings = self._read_settings()
+        if self._settings.pop("_migrationPending", False):
+            self._save_settings()
         self._state = "ready" if self._settings["enabled"] else "disabled"
         self._error: str | None = None
 
@@ -456,6 +522,7 @@ class LumiHost:
             "defaultThinking": bool(self._settings.get("defaultThinking", False)),
             "gpuMode": self._settings.get("gpuMode", "automatic"),
             "gpuAcceleration": self._gpu_acceleration_status(),
+            "contextManagement": self._context_management_status(),
             "limits": dict(self._settings["limits"]),
             "modelInstallAvailable": bool(
                 self._loaded_release
@@ -561,12 +628,23 @@ class LumiHost:
                     raise LumiHostError("The Lumi runtime limits are invalid.")
                 bounds = {
                     "idleUnloadSeconds": (0, 86_400),
-                    "maxContextTokens": (512, 32_768),
+                    "turnTimeoutMinutes": (1, 120),
+                    "maxContextTokens": (512, _AUTO_CONTEXT_MAX_TOKENS),
                     "maxOutputTokens": (64, 8_192),
                     "maxConcurrentChats": (1, 8),
                     "maxActiveConversations": (1, 2_048),
                 }
                 for key, value in limits.items():
+                    if key in {"contextMode", "outputMode"}:
+                        if not isinstance(value, str) or value not in {
+                            "automatic",
+                            "manual",
+                        }:
+                            raise LumiHostError(
+                                f"The Lumi {key} setting must be automatic or manual."
+                            )
+                        proposed_limits[key] = value
+                        continue
                     minimum, maximum = bounds[key]
                     if type(value) is not int or not minimum <= value <= maximum:
                         raise LumiHostError(
@@ -574,7 +652,9 @@ class LumiHost:
                         )
                     proposed_limits[key] = value
             if (
-                proposed_limits["maxOutputTokens"] + 256
+                proposed_limits["contextMode"] == "manual"
+                and proposed_limits["outputMode"] == "manual"
+                and proposed_limits["maxOutputTokens"] + 256
                 >= proposed_limits["maxContextTokens"]
             ):
                 raise LumiHostError(
@@ -970,7 +1050,13 @@ class LumiHost:
         )
         registry = self._create_tool_registry(loaded)
         agent_module = importlib.import_module("lumi.agent")
-        agent_limits = _create_agent_limits(agent_module, limits)
+        agent_limits = _create_agent_limits(
+            agent_module,
+            limits,
+            automatic_context_supported=_runtime_supports_automatic_context(
+                runtime_module
+            ),
+        )
         service = loaded.create_embedded_service(
             runtime=runtime,
             models=model_catalog,
@@ -1177,7 +1263,7 @@ class LumiHost:
 
     def _read_settings(self) -> dict[str, Any]:
         defaults = {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "enabled": False,
             "releaseTag": None,
             "webSearchUrl": None,
@@ -1192,9 +1278,10 @@ class LumiHost:
             payload = json.loads(self.settings_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError):
             return defaults
-        if not isinstance(payload, dict) or payload.get("schemaVersion") != 1:
+        if not isinstance(payload, dict) or payload.get("schemaVersion") not in {1, 2}:
             return defaults
         result = dict(defaults)
+        migration_pending = payload.get("schemaVersion") == 1
         result["enabled"] = payload.get("enabled") is True
         tag = payload.get("releaseTag")
         result["releaseTag"] = (
@@ -1234,9 +1321,21 @@ class LumiHost:
             ]
         limits = payload.get("limits")
         if isinstance(limits, dict):
-            for key, default in _DEFAULT_LIMITS.items():
+            for key in ("contextMode", "outputMode"):
                 value = limits.get(key)
-                if type(value) is int and 0 <= value <= 32_768:
+                if isinstance(value, str) and value in {"automatic", "manual"}:
+                    result["limits"][key] = value
+            integer_bounds = {
+                "idleUnloadSeconds": (0, 86_400),
+                "turnTimeoutMinutes": (1, 120),
+                "maxContextTokens": (512, _AUTO_CONTEXT_MAX_TOKENS),
+                "maxOutputTokens": (64, 8_192),
+                "maxConcurrentChats": (1, 8),
+                "maxActiveConversations": (1, 2_048),
+            }
+            for key, (minimum, maximum) in integer_bounds.items():
+                value = limits.get(key)
+                if type(value) is int and minimum <= value <= maximum:
                     result["limits"][key] = value
         models = payload.get("models")
         if isinstance(models, dict):
@@ -1249,6 +1348,8 @@ class LumiHost:
             }
         if not result["releaseTag"]:
             result["enabled"] = False
+        if migration_pending:
+            result["_migrationPending"] = True
         return result
 
     def _save_settings(self) -> None:
@@ -1301,6 +1402,67 @@ class LumiHost:
             },
             **self.model_settings(),
         }
+
+    def _context_management_status(self) -> dict[str, Any]:
+        status: dict[str, Any] = {
+            "supported": False,
+            "allocatedContextTokens": None,
+            "verifiedMaximumContextTokens": None,
+            "growthCeilingContextTokens": None,
+            "memoryGrowthCeilingContextTokens": None,
+            "growthState": "unsupported",
+            "compactionState": "unsupported",
+        }
+        loaded = self._loaded_release
+        runtime_module = getattr(loaded, "runtime_module", None)
+        if loaded is None or not _runtime_supports_automatic_context(runtime_module):
+            return status
+        status["supported"] = True
+        service_status = getattr(self._service, "context_management_status", None)
+        if callable(service_status):
+            try:
+                service_value = service_status()
+            except Exception:
+                logger.warning("Could not read Lumi compaction status", exc_info=True)
+                service_value = None
+            if isinstance(service_value, Mapping) and service_value.get(
+                "compactionState"
+            ) in {"idle", "summarizing"}:
+                status["compactionState"] = service_value["compactionState"]
+            else:
+                status["compactionState"] = "idle"
+        getter = getattr(self._runtime, "context_status", None)
+        if not callable(getter):
+            return status
+        try:
+            runtime_status = getter()
+        except Exception:
+            logger.warning("Could not read Lumi context status", exc_info=True)
+            status["growthState"] = "unavailable"
+            return status
+        if not isinstance(runtime_status, Mapping):
+            status["growthState"] = "unavailable"
+            return status
+        for key in (
+            "allocatedContextTokens",
+            "verifiedMaximumContextTokens",
+            "growthCeilingContextTokens",
+            "memoryGrowthCeilingContextTokens",
+        ):
+            value = runtime_status.get(key)
+            if type(value) is int and value > 0:
+                status[key] = value
+        growth_state = runtime_status.get("growthState")
+        if isinstance(growth_state, str) and growth_state in {
+            "idle",
+            "loading",
+            "growing",
+            "ready",
+            "limited",
+            "unavailable",
+        }:
+            status["growthState"] = growth_state
+        return status
 
     def _gpu_acceleration_status(self) -> dict[str, Any]:
         mode = self._settings.get("gpuMode", "automatic")

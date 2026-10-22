@@ -56,6 +56,9 @@ class LumiModelsResponse(DocsModel):
 
 class LumiRuntimeLimits(DocsModel):
     idleUnloadSeconds: int
+    contextMode: Literal["automatic", "manual"]
+    outputMode: Literal["automatic", "manual"]
+    turnTimeoutMinutes: int
     maxContextTokens: int
     maxOutputTokens: int
     maxConcurrentChats: int
@@ -64,6 +67,9 @@ class LumiRuntimeLimits(DocsModel):
 
 class LumiRuntimeLimitsUpdate(DocsModel):
     idleUnloadSeconds: int | None = None
+    contextMode: Literal["automatic", "manual"] | None = None
+    outputMode: Literal["automatic", "manual"] | None = None
+    turnTimeoutMinutes: int | None = None
     maxContextTokens: int | None = None
     maxOutputTokens: int | None = None
     maxConcurrentChats: int | None = None
@@ -87,11 +93,24 @@ class LumiGpuAcceleration(DocsModel):
     fallbackReason: str | None = None
 
 
+class LumiContextManagement(DocsModel):
+    supported: bool = False
+    allocatedContextTokens: int | None = None
+    verifiedMaximumContextTokens: int | None = None
+    growthCeilingContextTokens: int | None = None
+    memoryGrowthCeilingContextTokens: int | None = None
+    compactionState: Literal["unsupported", "idle", "summarizing"] = "unsupported"
+    growthState: Literal[
+        "unsupported", "idle", "loading", "growing", "ready", "limited", "unavailable"
+    ] = "unsupported"
+
+
 class LumiAdminModelsResponse(LumiModelsResponse):
     modelInstallAvailable: bool = False
     limits: LumiRuntimeLimits | None = None
     gpuMode: Literal["automatic", "cpu_only", "gpu_preferred"] = "automatic"
     gpuAcceleration: LumiGpuAcceleration = Field(default_factory=LumiGpuAcceleration)
+    contextManagement: LumiContextManagement = Field(default_factory=LumiContextManagement)
 
 
 class LumiConversationRecord(DocsModel):
@@ -150,6 +169,9 @@ class LumiConversationListResponse(DocsModel):
 class LumiConversationDetailResponse(DocsModel):
     conversation: LumiConversationRecord
     messages: list[LumiMessage] = Field(default_factory=list)
+    nextCursor: str | None = None
+    hasMore: bool = False
+    hasSummary: bool = False
 
 
 class LumiTurnRequest(DocsModel):
@@ -169,6 +191,7 @@ class LumiConversationRenameRequest(DocsModel):
 
 class LumiAnswer(DocsModel):
     markdown: str
+    finishReason: Literal["stop", "tool_calls", "context_exhausted", "deadline"] = "stop"
     references: list[LumiEntityReference] = Field(default_factory=list)
     sources: list[LumiSource] = Field(default_factory=list)
 
@@ -1653,6 +1676,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     LumiRuntimeLimitsUpdate,
     LumiRuntimeSettingsRequest,
     LumiAdminModelsResponse,
+    LumiContextManagement,
     LumiConversationRecord,
     LumiEntityReference,
     LumiSource,
@@ -1968,6 +1992,7 @@ _PARAMETER_DESCRIPTIONS = {
     "pageSize": "Number of rows per page, bounded by the endpoint.",
     "limit": "Optional response-size cap.",
     "query": "Search text.",
+    "cursor": "Opaque owner- and conversation-bound cursor for loading the next older Lumi message page.",
     "sortBy": "Server-supported sort field.",
     "sortOrder": "Sort direction; the default is `ascending`.",
     "view": "Catalog projection: `full` or compact `card`.",
@@ -2877,6 +2902,17 @@ _REQUEST_EXAMPLES: dict[type[BaseModel], Any] = {
         "model": "qwen3.5:2b",
         "thinking": True,
     },
+    LumiRuntimeSettingsRequest: {
+        "defaultThinking": True,
+        "limits": {
+            "contextMode": "automatic",
+            "outputMode": "automatic",
+            "turnTimeoutMinutes": 30,
+            "maxContextTokens": 8192,
+            "maxOutputTokens": 2048,
+        },
+        "gpuMode": "automatic",
+    },
     LumiConversationRenameRequest: {"title": "What to watch next"},
     LumiModelChoiceRequest: {"model": "qwen3.5:2b", "thinking": True},
     LumiIntegrationSettingsRequest: {"enabled": True, "releaseTag": "v0.1.0"},
@@ -2980,6 +3016,9 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
             "updatedAt": "2026-01-01T12:00:00Z",
         },
         "messages": [],
+        "nextCursor": "cursor-example",
+        "hasMore": True,
+        "hasSummary": False,
     },
     LumiTurnResponse: {
         "conversation": {
@@ -2992,6 +3031,7 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
         },
         "answer": {
             "markdown": "Here are a few options.",
+            "finishReason": "stop",
             "references": [],
             "sources": [],
         },
@@ -3021,8 +3061,20 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
             "totalLayers": 32,
             "fallbackReason": None,
         },
+        "contextManagement": {
+            "supported": True,
+            "allocatedContextTokens": 32768,
+            "verifiedMaximumContextTokens": 262144,
+            "growthCeilingContextTokens": None,
+            "memoryGrowthCeilingContextTokens": None,
+            "compactionState": "idle",
+            "growthState": "ready",
+        },
         "limits": {
             "idleUnloadSeconds": 300,
+            "contextMode": "automatic",
+            "outputMode": "automatic",
+            "turnTimeoutMinutes": 30,
             "maxContextTokens": 8192,
             "maxOutputTokens": 2048,
             "maxConcurrentChats": 1,
@@ -3055,8 +3107,20 @@ _RESPONSE_EXAMPLES: dict[type[BaseModel], Any] = {
             "totalLayers": None,
             "fallbackReason": None,
         },
+        "contextManagement": {
+            "supported": False,
+            "allocatedContextTokens": None,
+            "verifiedMaximumContextTokens": None,
+            "growthCeilingContextTokens": None,
+            "memoryGrowthCeilingContextTokens": None,
+            "compactionState": "unsupported",
+            "growthState": "unsupported",
+        },
         "limits": {
             "idleUnloadSeconds": 300,
+            "contextMode": "automatic",
+            "outputMode": "automatic",
+            "turnTimeoutMinutes": 30,
             "maxContextTokens": 8192,
             "maxOutputTokens": 2048,
             "maxConcurrentChats": 1,
@@ -3447,7 +3511,8 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
         return {
             "200": {
                 "description": (
-                    "Server-sent events with visible text deltas, reset events with safe "
+                    "Server-sent events with visible text deltas, safe context expansion and "
+                    "summarization status events, reset events with safe "
                     "reason codes when partial text is discarded, and one final "
                     "conversation and answer payload. Tool calls and internal reasoning "
                     "are omitted."
@@ -3458,7 +3523,8 @@ def _response_for(path: str, method: str) -> dict[str, Any]:
                         "example": (
                             'event: delta\ndata: {"text":"Hello"}\n\n'
                             'event: reset\ndata: {"reason":"cpu_fallback"}\n\n'
-                            'event: complete\ndata: {"conversation":{},"answer":{"markdown":"Hello","references":[],"sources":[]}}\n\n'
+                            'event: status\ndata: {"stage":"summarization"}\n\n'
+                            'event: complete\ndata: {"conversation":{},"answer":{"markdown":"Hello","finishReason":"stop","references":[],"sources":[]}}\n\n'
                         ),
                     }
                 },

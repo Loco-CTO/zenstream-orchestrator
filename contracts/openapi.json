@@ -5072,6 +5072,9 @@
       "LumiAdminModelsResponse": {
         "additionalProperties": true,
         "properties": {
+          "contextManagement": {
+            "$ref": "#/components/schemas/LumiContextManagement"
+          },
           "defaultModel": {
             "anyOf": [
               {
@@ -5132,6 +5135,9 @@
       "LumiAdminStatusResponse": {
         "additionalProperties": true,
         "properties": {
+          "contextManagement": {
+            "$ref": "#/components/schemas/LumiContextManagement"
+          },
           "defaultModel": {
             "anyOf": [
               {
@@ -5198,6 +5204,17 @@
       "LumiAnswer": {
         "additionalProperties": true,
         "properties": {
+          "finishReason": {
+            "default": "stop",
+            "enum": [
+              "stop",
+              "tool_calls",
+              "context_exhausted",
+              "deadline"
+            ],
+            "title": "Finishreason",
+            "type": "string"
+          },
           "markdown": {
             "title": "Markdown",
             "type": "string"
@@ -5223,6 +5240,90 @@
         "title": "LumiAnswer",
         "type": "object"
       },
+      "LumiContextManagement": {
+        "additionalProperties": true,
+        "properties": {
+          "allocatedContextTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Allocatedcontexttokens"
+          },
+          "compactionState": {
+            "default": "unsupported",
+            "enum": [
+              "unsupported",
+              "idle",
+              "summarizing"
+            ],
+            "title": "Compactionstate",
+            "type": "string"
+          },
+          "growthCeilingContextTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Growthceilingcontexttokens"
+          },
+          "growthState": {
+            "default": "unsupported",
+            "enum": [
+              "unsupported",
+              "idle",
+              "loading",
+              "growing",
+              "ready",
+              "limited",
+              "unavailable"
+            ],
+            "title": "Growthstate",
+            "type": "string"
+          },
+          "memoryGrowthCeilingContextTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Memorygrowthceilingcontexttokens"
+          },
+          "supported": {
+            "default": false,
+            "title": "Supported",
+            "type": "boolean"
+          },
+          "verifiedMaximumContextTokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Verifiedmaximumcontexttokens"
+          }
+        },
+        "title": "LumiContextManagement",
+        "type": "object"
+      },
       "LumiConversationDeleteResponse": {
         "additionalProperties": true,
         "properties": {
@@ -5244,12 +5345,34 @@
           "conversation": {
             "$ref": "#/components/schemas/LumiConversationRecord"
           },
+          "hasMore": {
+            "default": false,
+            "title": "Hasmore",
+            "type": "boolean"
+          },
+          "hasSummary": {
+            "default": false,
+            "title": "Hassummary",
+            "type": "boolean"
+          },
           "messages": {
             "items": {
               "$ref": "#/components/schemas/LumiMessage"
             },
             "title": "Messages",
             "type": "array"
+          },
+          "nextCursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Nextcursor"
           }
         },
         "required": [
@@ -5962,6 +6085,14 @@
       "LumiRuntimeLimits": {
         "additionalProperties": true,
         "properties": {
+          "contextMode": {
+            "enum": [
+              "automatic",
+              "manual"
+            ],
+            "title": "Contextmode",
+            "type": "string"
+          },
           "idleUnloadSeconds": {
             "title": "Idleunloadseconds",
             "type": "integer"
@@ -5981,10 +6112,25 @@
           "maxOutputTokens": {
             "title": "Maxoutputtokens",
             "type": "integer"
+          },
+          "outputMode": {
+            "enum": [
+              "automatic",
+              "manual"
+            ],
+            "title": "Outputmode",
+            "type": "string"
+          },
+          "turnTimeoutMinutes": {
+            "title": "Turntimeoutminutes",
+            "type": "integer"
           }
         },
         "required": [
           "idleUnloadSeconds",
+          "contextMode",
+          "outputMode",
+          "turnTimeoutMinutes",
           "maxContextTokens",
           "maxOutputTokens",
           "maxConcurrentChats",
@@ -5996,6 +6142,22 @@
       "LumiRuntimeLimitsUpdate": {
         "additionalProperties": true,
         "properties": {
+          "contextMode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "automatic",
+                  "manual"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Contextmode"
+          },
           "idleUnloadSeconds": {
             "anyOf": [
               {
@@ -6055,6 +6217,34 @@
             ],
             "default": null,
             "title": "Maxoutputtokens"
+          },
+          "outputMode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "automatic",
+                  "manual"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Outputmode"
+          },
+          "turnTimeoutMinutes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Turntimeoutminutes"
           }
         },
         "title": "LumiRuntimeLimitsUpdate",
@@ -18271,6 +18461,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": null,
+                    "compactionState": "unsupported",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "unsupported",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": false,
+                    "verifiedMaximumContextTokens": null
+                  },
                   "defaultModel": null,
                   "defaultThinking": false,
                   "gpuAcceleration": {
@@ -18295,11 +18494,14 @@
                     "state": "disabled"
                   },
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": false,
                   "models": []
@@ -18386,6 +18588,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": 32768,
+                    "compactionState": "idle",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "ready",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": true,
+                    "verifiedMaximumContextTokens": 262144
+                  },
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
                   "gpuAcceleration": {
@@ -18400,11 +18611,14 @@
                   },
                   "gpuMode": "automatic",
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": true,
                   "models": [
@@ -18517,6 +18731,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": 32768,
+                    "compactionState": "idle",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "ready",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": true,
+                    "verifiedMaximumContextTokens": 262144
+                  },
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
                   "gpuAcceleration": {
@@ -18531,11 +18754,14 @@
                   },
                   "gpuMode": "automatic",
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": true,
                   "models": [
@@ -18751,6 +18977,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": 32768,
+                    "compactionState": "idle",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "ready",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": true,
+                    "verifiedMaximumContextTokens": 262144
+                  },
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
                   "gpuAcceleration": {
@@ -18765,11 +19000,14 @@
                   },
                   "gpuMode": "automatic",
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": true,
                   "models": [
@@ -18876,6 +19114,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": 32768,
+                    "compactionState": "idle",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "ready",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": true,
+                    "verifiedMaximumContextTokens": 262144
+                  },
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
                   "gpuAcceleration": {
@@ -18890,11 +19137,14 @@
                   },
                   "gpuMode": "automatic",
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": true,
                   "models": [
@@ -19001,6 +19251,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": 32768,
+                    "compactionState": "idle",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "ready",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": true,
+                    "verifiedMaximumContextTokens": 262144
+                  },
                   "defaultModel": "qwen3.5:2b",
                   "defaultThinking": true,
                   "gpuAcceleration": {
@@ -19015,11 +19274,14 @@
                   },
                   "gpuMode": "automatic",
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": true,
                   "models": [
@@ -19217,6 +19479,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": null,
+                    "compactionState": "unsupported",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "unsupported",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": false,
+                    "verifiedMaximumContextTokens": null
+                  },
                   "defaultModel": null,
                   "defaultThinking": false,
                   "gpuAcceleration": {
@@ -19241,11 +19512,14 @@
                     "state": "disabled"
                   },
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": false,
                   "models": []
@@ -19332,6 +19606,15 @@
             "content": {
               "application/json": {
                 "example": {
+                  "contextManagement": {
+                    "allocatedContextTokens": null,
+                    "compactionState": "unsupported",
+                    "growthCeilingContextTokens": null,
+                    "growthState": "unsupported",
+                    "memoryGrowthCeilingContextTokens": null,
+                    "supported": false,
+                    "verifiedMaximumContextTokens": null
+                  },
                   "defaultModel": null,
                   "defaultThinking": false,
                   "gpuAcceleration": {
@@ -19356,11 +19639,14 @@
                     "state": "disabled"
                   },
                   "limits": {
+                    "contextMode": "automatic",
                     "idleUnloadSeconds": 300,
                     "maxActiveConversations": 128,
                     "maxConcurrentChats": 1,
                     "maxContextTokens": 8192,
-                    "maxOutputTokens": 2048
+                    "maxOutputTokens": 2048,
+                    "outputMode": "automatic",
+                    "turnTimeoutMinutes": 30
                   },
                   "modelInstallAvailable": false,
                   "models": []
@@ -26724,6 +27010,23 @@
               "title": "Conversation Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Opaque owner- and conversation-bound cursor for loading the next older Lumi message page.",
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
           }
         ],
         "responses": {
@@ -26739,7 +27042,10 @@
                     "title": "What to watch next",
                     "updatedAt": "2026-01-01T12:00:00Z"
                   },
-                  "messages": []
+                  "hasMore": true,
+                  "hasSummary": false,
+                  "messages": [],
+                  "nextCursor": "cursor-example"
                 },
                 "schema": {
                   "$ref": "#/components/schemas/LumiConversationDetailResponse"
@@ -27049,6 +27355,7 @@
               "application/json": {
                 "example": {
                   "answer": {
+                    "finishReason": "stop",
                     "markdown": "Here are a few options.",
                     "references": [],
                     "sources": []
@@ -27169,13 +27476,13 @@
           "200": {
             "content": {
               "text/event-stream": {
-                "example": "event: delta\ndata: {\"text\":\"Hello\"}\n\nevent: reset\ndata: {\"reason\":\"cpu_fallback\"}\n\nevent: complete\ndata: {\"conversation\":{},\"answer\":{\"markdown\":\"Hello\",\"references\":[],\"sources\":[]}}\n\n",
+                "example": "event: delta\ndata: {\"text\":\"Hello\"}\n\nevent: reset\ndata: {\"reason\":\"cpu_fallback\"}\n\nevent: status\ndata: {\"stage\":\"summarization\"}\n\nevent: complete\ndata: {\"conversation\":{},\"answer\":{\"markdown\":\"Hello\",\"finishReason\":\"stop\",\"references\":[],\"sources\":[]}}\n\n",
                 "schema": {
                   "type": "string"
                 }
               }
             },
-            "description": "Server-sent events with visible text deltas, reset events with safe reason codes when partial text is discarded, and one final conversation and answer payload. Tool calls and internal reasoning are omitted.",
+            "description": "Server-sent events with visible text deltas, safe context expansion and summarization status events, reset events with safe reason codes when partial text is discarded, and one final conversation and answer payload. Tool calls and internal reasoning are omitted.",
             "headers": {
               "Cache-Control": {
                 "example": "private, no-store, no-transform",
@@ -27543,7 +27850,7 @@
             }
           },
           {
-            "description": "cursor value supplied in the query component.",
+            "description": "Opaque owner- and conversation-bound cursor for loading the next older Lumi message page.",
             "in": "query",
             "name": "cursor",
             "required": false,

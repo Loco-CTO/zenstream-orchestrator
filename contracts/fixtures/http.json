@@ -9086,6 +9086,9 @@
         "parameters": {
           "path": {
             "conversation_id": "fixture-id"
+          },
+          "query": {
+            "cursor": "x"
           }
         },
         "path": "/api/lumi/conversations/fixture-id",
@@ -9101,6 +9104,8 @@
             "title": "Fixture Item",
             "updatedAt": "2026-09-29T12:00:00Z"
           },
+          "hasMore": true,
+          "hasSummary": true,
           "messages": [
             {
               "content": "x",
@@ -9123,7 +9128,8 @@
                 }
               ]
             }
-          ]
+          ],
+          "nextCursor": null
         },
         "contentType": "application/json",
         "schemaRef": "#/components/schemas/LumiConversationDetailResponse",
@@ -9220,6 +9226,7 @@
       "response": {
         "body": {
           "answer": {
+            "finishReason": "stop",
             "markdown": "x",
             "references": [
               {

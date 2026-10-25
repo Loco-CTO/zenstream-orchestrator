@@ -4915,6 +4915,56 @@
       }
     },
     {
+      "operationId": "post_api_account_sync",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "deviceId": "fixture-id",
+            "operations": [
+              {
+                "activityMs": 0,
+                "baseRevision": 0,
+                "clockTrusted": true,
+                "historyEpoch": 0,
+                "id": "00000000-0000-4000-8000-000000000001",
+                "kind": "checkpoint",
+                "payload": {},
+                "privacyEpoch": 0,
+                "sequence": 1,
+                "targetId": "fixture-id"
+              }
+            ],
+            "serverInstanceId": "fixture-id"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/account/sync",
+        "pathTemplate": "/api/account/sync"
+      },
+      "response": {
+        "body": {
+          "acknowledgements": [
+            {
+              "id": "fixture-id",
+              "outcome": "applied",
+              "revision": {},
+              "sequence": 1,
+              "state": {},
+              "targetId": "fixture-id"
+            }
+          ],
+          "historyEpoch": 1,
+          "privacyEpoch": 1,
+          "serverTime": "2026-09-29T12:00:00Z"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/AccountSyncResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "delete_api_account_watch_history",
       "request": {
         "method": "DELETE",

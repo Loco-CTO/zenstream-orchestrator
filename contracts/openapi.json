@@ -1,6 +1,68 @@
 {
   "components": {
     "schemas": {
+      "AccountSyncRequest": {
+        "properties": {
+          "deviceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Deviceid",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/SyncOperation"
+            },
+            "maxItems": 100,
+            "title": "Operations",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Serverinstanceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "deviceId",
+          "operations"
+        ],
+        "title": "AccountSyncRequest",
+        "type": "object"
+      },
+      "AccountSyncResponse": {
+        "properties": {
+          "acknowledgements": {
+            "items": {
+              "$ref": "#/components/schemas/SyncAcknowledgement"
+            },
+            "title": "Acknowledgements",
+            "type": "array"
+          },
+          "historyEpoch": {
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "privacyEpoch": {
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverTime",
+          "historyEpoch",
+          "privacyEpoch",
+          "acknowledgements"
+        ],
+        "title": "AccountSyncResponse",
+        "type": "object"
+      },
       "AdminAccount": {
         "additionalProperties": true,
         "properties": {
@@ -9993,6 +10055,141 @@
         "title": "SonarrCalendarConnectionUpdate",
         "type": "object"
       },
+      "SyncAcknowledgement": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "applied",
+              "superseded",
+              "duplicate",
+              "privacy_blocked",
+              "rejected"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Revision"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "State"
+          },
+          "targetId": {
+            "title": "Targetid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "outcome",
+          "targetId"
+        ],
+        "title": "SyncAcknowledgement",
+        "type": "object"
+      },
+      "SyncOperation": {
+        "properties": {
+          "activityMs": {
+            "minimum": 0,
+            "title": "Activityms",
+            "type": "integer"
+          },
+          "baseRevision": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Baserevision",
+            "type": "integer"
+          },
+          "clockTrusted": {
+            "default": true,
+            "title": "Clocktrusted",
+            "type": "boolean"
+          },
+          "historyEpoch": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "checkpoint",
+              "complete",
+              "watched",
+              "unwatched",
+              "music_play"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "privacyEpoch": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "sequence": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "targetId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Targetid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "kind",
+          "targetId",
+          "activityMs"
+        ],
+        "title": "SyncOperation",
+        "type": "object"
+      },
       "SyncplayCommandRequest": {
         "additionalProperties": true,
         "properties": {
@@ -12811,6 +13008,96 @@
           }
         ],
         "summary": "Reorder playlist items",
+        "tags": [
+          "Account & Preferences"
+        ]
+      }
+    },
+    "/api/account/sync": {
+      "post": {
+        "description": "Post /api/account/sync. The response is scoped to the authenticated account and preserves the existing preference payload. Method: `POST`; path: `/api/account/sync`.",
+        "operationId": "post_api_account_sync",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountSyncRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSyncResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/account/sync",
         "tags": [
           "Account & Preferences"
         ]

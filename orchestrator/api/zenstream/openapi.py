@@ -13,6 +13,7 @@ import warnings
 from copy import deepcopy
 from typing import Any, Literal
 
+from app.offline_sync import AccountSyncRequest, AccountSyncResponse
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
@@ -1540,6 +1541,8 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    AccountSyncRequest,
+    AccountSyncResponse,
     OfflineCapabilities,
     ErrorResponse,
     ValidationErrorItem,
@@ -2554,6 +2557,7 @@ def _error_responses(statuses: tuple[int, ...]) -> dict[str, Any]:
 
 
 _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/account/sync"): AccountSyncRequest,
     ("POST", "/api/auth/login"): CredentialsRequest,
     ("POST", "/api/auth/browser-login"): CredentialsRequest,
     ("POST", "/api/auth/refresh"): RefreshRequest,
@@ -2695,6 +2699,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/account/sync"): AccountSyncResponse,
     ("GET", "/api/offline/capabilities"): OfflineCapabilities,
     ("GET", "/"): HealthResponse,
     ("GET", "/health/ready"): HealthResponse,

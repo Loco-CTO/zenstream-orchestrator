@@ -13,6 +13,7 @@ import warnings
 from copy import deepcopy
 from typing import Any, Literal
 
+from app.offline_selections import OfflineSelectionRequest, OfflineSelectionResponse
 from app.offline_sync import AccountSyncRequest, AccountSyncResponse
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
@@ -1541,6 +1542,8 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    OfflineSelectionRequest,
+    OfflineSelectionResponse,
     AccountSyncRequest,
     AccountSyncResponse,
     OfflineCapabilities,
@@ -2557,6 +2560,7 @@ def _error_responses(statuses: tuple[int, ...]) -> dict[str, Any]:
 
 
 _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/selections"): OfflineSelectionRequest,
     ("POST", "/api/account/sync"): AccountSyncRequest,
     ("POST", "/api/auth/login"): CredentialsRequest,
     ("POST", "/api/auth/browser-login"): CredentialsRequest,
@@ -2699,6 +2703,9 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/selections"): OfflineSelectionResponse,
+    ("GET", "/api/offline/selections/{selection_id}"): OfflineSelectionResponse,
+    ("DELETE", "/api/offline/selections/{selection_id}"): OfflineSelectionResponse,
     ("POST", "/api/account/sync"): AccountSyncResponse,
     ("GET", "/api/offline/capabilities"): OfflineCapabilities,
     ("GET", "/"): HealthResponse,

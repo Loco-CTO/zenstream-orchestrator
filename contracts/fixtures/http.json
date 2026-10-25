@@ -9575,6 +9575,110 @@
       }
     },
     {
+      "operationId": "post_api_offline_selections",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "itemId": "fixture-id",
+            "kind": "catalog",
+            "language": "xx"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/selections",
+        "pathTemplate": "/api/offline/selections"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "delete_api_offline_selections_by_selection_id",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {}
+        },
+        "method": "DELETE",
+        "parameters": {
+          "path": {
+            "selection_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/selections/fixture-id",
+        "pathTemplate": "/api/offline/selections/{selection_id}"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_selections_by_selection_id",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "selection_id": "fixture-id"
+          },
+          "query": {
+            "offset": 0
+          }
+        },
+        "path": "/api/offline/selections/fixture-id",
+        "pathTemplate": "/api/offline/selections/{selection_id}"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "post_api_playback_items_by_entity_id_access",
       "request": {
         "body": {

@@ -7855,6 +7855,100 @@
         "title": "OfflineCapabilities",
         "type": "object"
       },
+      "OfflineSelectionRequest": {
+        "properties": {
+          "itemId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Itemid",
+            "type": "string"
+          },
+          "kind": {
+            "default": "catalog",
+            "enum": [
+              "catalog",
+              "playlist"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "language": {
+            "default": "en",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Language",
+            "type": "string"
+          }
+        },
+        "required": [
+          "itemId"
+        ],
+        "title": "OfflineSelectionRequest",
+        "type": "object"
+      },
+      "OfflineSelectionResponse": {
+        "properties": {
+          "errorCode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Errorcode"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "itemCount": {
+            "title": "Itemcount",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "metadata": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Metadata",
+            "type": "array"
+          },
+          "nextOffset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Nextoffset"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "itemCount"
+        ],
+        "title": "OfflineSelectionResponse",
+        "type": "object"
+      },
       "PasswordChangeRequest": {
         "additionalProperties": true,
         "properties": {
@@ -28701,6 +28795,281 @@
           }
         ],
         "summary": "Get /api/offline/capabilities",
+        "tags": [
+          "Catalog"
+        ]
+      }
+    },
+    "/api/offline/selections": {
+      "post": {
+        "description": "Post /api/offline/selections. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `POST`; path: `/api/offline/selections`.",
+        "operationId": "post_api_offline_selections",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineSelectionRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/offline/selections",
+        "tags": [
+          "Catalog"
+        ]
+      }
+    },
+    "/api/offline/selections/{selection_id}": {
+      "delete": {
+        "description": "Delete /api/offline/selections/{selection_id}. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `DELETE`; path: `/api/offline/selections/{selection_id}`.",
+        "operationId": "delete_api_offline_selections_by_selection_id",
+        "parameters": [
+          {
+            "description": "selection_id value supplied in the path component.",
+            "in": "path",
+            "name": "selection_id",
+            "required": true,
+            "schema": {
+              "title": "Selection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FlexibleObject"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Delete /api/offline/selections/{selection_id}",
+        "tags": [
+          "Catalog"
+        ]
+      },
+      "get": {
+        "description": "Get /api/offline/selections/{selection_id}. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `GET`; path: `/api/offline/selections/{selection_id}`.",
+        "operationId": "get_api_offline_selections_by_selection_id",
+        "parameters": [
+          {
+            "description": "selection_id value supplied in the path component.",
+            "in": "path",
+            "name": "selection_id",
+            "required": true,
+            "schema": {
+              "title": "Selection Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "offset value supplied in the query component.",
+            "example": 0,
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/selections/{selection_id}",
         "tags": [
           "Catalog"
         ]

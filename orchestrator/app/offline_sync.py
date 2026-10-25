@@ -5,6 +5,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from app.account_sync import epochs, field_revision
+from app.notifications import FollowService
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,7 +14,17 @@ class SyncOperation(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: UUID
     sequence: int = Field(ge=1, le=9223372036854775807)
-    kind: Literal["checkpoint", "complete", "watched", "unwatched", "music_play"]
+    kind: Literal[
+        "checkpoint",
+        "complete",
+        "watched",
+        "unwatched",
+        "music_play",
+        "favorite",
+        "unfavorite",
+        "follow",
+        "unfollow",
+    ]
     targetId: str = Field(min_length=1, max_length=200)
     activityMs: int = Field(ge=0)
     clockTrusted: bool = True
@@ -120,6 +131,10 @@ class AccountSyncService:
 
     @staticmethod
     def _field(operation):
+        if operation.kind in {"favorite", "unfavorite"}:
+            return "favorite"
+        if operation.kind in {"follow", "unfollow"}:
+            return "following"
         return "playback"
 
     @staticmethod
@@ -148,8 +163,30 @@ class AccountSyncService:
             (user_id, operation.targetId, field, activity, str(operation.id)),
         )
 
+    def _apply_flag(self, user_id, operation, entity, field):
+        if field == "following" and entity[3] not in {"movie", "series", "artist"}:
+            raise HTTPException(
+                400, "Follow operations require the movie, series, or artist identity."
+            )
+        if not self._wins(user_id, operation, field):
+            return "superseded"
+        if field == "favorite":
+            self.catalog.update_state(
+                user_id, operation.targetId, {"favorite": operation.kind == "favorite"}
+            )
+        else:
+            FollowService(self.db).set_for_entity(
+                user_id, operation.targetId, operation.kind == "follow"
+            )
+        self._stamp(user_id, operation, field)
+        self.catalog._invalidate_home_cache(user_id)
+        return "applied"
+
     def _apply(self, user_id, operation):
         entity = self.catalog.require_entity(user_id, operation.targetId)
+        field = self._field(operation)
+        if field != "playback":
+            return self._apply_flag(user_id, operation, entity, field)
         if entity[3] not in {"movie", "episode", "track"}:
             raise HTTPException(400, "Offline playback state requires a playable item.")
         generations = epochs(self.db, user_id)

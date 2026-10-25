@@ -10151,7 +10151,11 @@
               "complete",
               "watched",
               "unwatched",
-              "music_play"
+              "music_play",
+              "favorite",
+              "unfavorite",
+              "follow",
+              "unfollow"
             ],
             "title": "Kind",
             "type": "string"

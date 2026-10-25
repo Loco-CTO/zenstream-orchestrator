@@ -1,7 +1,7 @@
 import time
 import unittest
 import uuid
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.account_sync import clear_history_barrier
 from app.catalog import Catalog
@@ -156,6 +156,45 @@ class OfflinePlaybackSyncTest(unittest.TestCase):
         self.assertEqual(
             self.db.read_execute("SELECT count(*) FROM user_item_state")[0][0], 0
         )
+
+    def test_favorites_are_independent_of_playback_and_privacy(self):
+        self.catalog._watch_history_enabled = lambda _user: False
+        self.send(self.operation(kind="favorite", activityMs=self.now - 1000))
+        self.assertTrue(self.catalog._state("viewer", "movie")["favorite"])
+        self.send(self.operation(sequence=2, kind="unfavorite", activityMs=self.now))
+        self.assertFalse(self.catalog._state("viewer", "movie")["favorite"])
+
+    def test_older_favorite_cannot_reverse_a_newer_toggle(self):
+        self.send(
+            self.operation(kind="favorite", activityMs=self.now + 1000), device="tablet"
+        )
+        self.assertEqual(
+            self.send(self.operation(kind="unfavorite"))[0]["outcome"], "superseded"
+        )
+
+    @patch("app.offline_sync.FollowService")
+    def test_follow_is_explicit_idempotent_and_permission_filtered(self, follow):
+        operation = self.operation(kind="follow")
+        self.send(operation)
+        self.send(operation)
+        follow.return_value.set_for_entity.assert_called_once_with(
+            "viewer", "movie", True
+        )
+        self.assertEqual(
+            self.send(self.operation(sequence=2, kind="unfollow", targetId="hidden"))[
+                0
+            ]["outcome"],
+            "rejected",
+        )
+        self.assertEqual(follow.return_value.set_for_entity.call_count, 1)
+
+    @patch("app.offline_sync.FollowService")
+    def test_track_follow_is_rejected(self, follow):
+        self.assertEqual(
+            self.send(self.operation(kind="follow", targetId="track"))[0]["outcome"],
+            "rejected",
+        )
+        follow.assert_not_called()
 
     def test_batches_are_bounded(self):
         with self.assertRaises(ValidationError):

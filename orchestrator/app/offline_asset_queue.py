@@ -173,12 +173,17 @@ class OfflineAssetQueue:
                 )
                 if not cursor.rowcount:
                     continue
-            name = (json.loads(raw) if raw else {}).get("storageName")
-            if name:
-                target = self.cache_directory / name
-                if target.resolve().parent != self.cache_directory.resolve():
-                    raise ValueError("Invalid prepared asset location")
-                target.unlink(missing_ok=True)
+            result = json.loads(raw) if raw else {}
+            names = [
+                result.get("storageName"),
+                *[item.get("storageName") for item in result.get("supplements", [])],
+            ]
+            for name in names:
+                if name:
+                    target = self.cache_directory / name
+                    if target.resolve().parent != self.cache_directory.resolve():
+                        raise ValueError("Invalid prepared asset location")
+                    target.unlink(missing_ok=True)
             self.db.execute(
                 "DELETE FROM offline_assets WHERE id=? AND NOT EXISTS (SELECT 1 FROM offline_asset_reservations WHERE asset_id=?)",
                 (identity, identity),

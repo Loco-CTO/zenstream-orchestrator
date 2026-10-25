@@ -9571,6 +9571,7 @@
       },
       "response": {
         "body": {
+          "bundleUrl": "x",
           "contentUrl": "x",
           "durationSeconds": 1.25,
           "errorCode": "x",
@@ -9609,6 +9610,7 @@
       },
       "response": {
         "body": {
+          "bundleUrl": "x",
           "contentUrl": "x",
           "durationSeconds": 1.25,
           "errorCode": "x",
@@ -9630,6 +9632,53 @@
         },
         "contentType": "application/json",
         "schemaRef": "#/components/schemas/OfflineAssetResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_bundle",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id"
+          },
+          "query": {
+            "language": "xx"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/bundle",
+        "pathTemplate": "/api/offline/assets/{asset_id}/bundle"
+      },
+      "response": {
+        "body": {
+          "artwork": [
+            {}
+          ],
+          "chapters": [
+            {}
+          ],
+          "itemId": "fixture-id",
+          "items": [
+            {}
+          ],
+          "language": "x",
+          "lyrics": {},
+          "presentationRevision": "x",
+          "segments": [
+            {}
+          ],
+          "stateRevisions": {},
+          "subtitles": [
+            {}
+          ],
+          "supplementRevision": "x",
+          "warnings": [
+            "x"
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineBundleResponse",
         "status": 200
       }
     },
@@ -9672,6 +9721,25 @@
         "pathTemplate": "/api/offline/assets/{asset_id}/content"
       },
       "response": {
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_supplements_by_index_vtt",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id",
+            "index": 1
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/supplements/1.vtt",
+        "pathTemplate": "/api/offline/assets/{asset_id}/supplements/{index}.vtt"
+      },
+      "response": {
+        "body": "fixture-binary-payload",
+        "contentType": "text/vtt",
         "status": 200
       }
     },

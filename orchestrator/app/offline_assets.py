@@ -4,6 +4,7 @@ import os
 from typing import Literal
 
 from app.offline_asset_queue import OfflineAssetQueue, now_ms
+from app.offline_bundle import prepare_subtitles, selected_subtitles
 from app.offline_conversion import (
     audio_index,
     conversion_capabilities,
@@ -36,6 +37,7 @@ class OfflineAssetResponse(BaseModel):
     profile: str
     state: str
     contentUrl: str | None = None
+    bundleUrl: str | None = None
     sizeBytes: int | None = None
     sha256: str | None = None
     mimeType: str | None = None
@@ -111,6 +113,10 @@ class OfflineAssets:
         }
         if body.profile != "original":
             normalized["audioStreamId"] = audio_index(source, body.audioStreamId)
+        if body.subtitleStreamIndices:
+            normalized["subtitles"] = selected_subtitles(
+                self, user_id, body.model_copy(update={"sourceId": source["id"]})
+            )
         identity = self.queue.enqueue(
             user_id, body.selectionId, normalized, retry=body.retry
         )
@@ -131,6 +137,8 @@ class OfflineAssets:
         request = json.loads(raw)
         public = json.loads(result) if result else {}
         public.pop("storageName", None)
+        public.pop("supplements", None)
+        public.pop("warnings", None)
         return {
             "id": identity,
             "itemId": entity,
@@ -140,6 +148,9 @@ class OfflineAssets:
             "state": state,
             "errorCode": error,
             "contentUrl": f"/api/offline/assets/{identity}/content"
+            if state == "ready"
+            else None,
+            "bundleUrl": f"/api/offline/assets/{identity}/bundle"
             if state == "ready"
             else None,
             **public,
@@ -164,6 +175,28 @@ class OfflineAssets:
         ]
 
     def produce(self, identity, request, should_stop):
+        result = self._produce_media(identity, request, should_stop)
+        try:
+            supplements, warnings = prepare_subtitles(
+                self, identity, request, should_stop
+            )
+            result.update(supplements=supplements, warnings=warnings)
+            if should_stop():
+                raise InterruptedError("Download preparation interrupted")
+            return result
+        except BaseException:
+            names = [
+                result.get("storageName"),
+                *[item.get("storageName") for item in result.get("supplements", [])],
+            ]
+            for name in names:
+                if name:
+                    target = self.queue.cache_directory / name
+                    if target.resolve().parent == self.queue.cache_directory.resolve():
+                        target.unlink(missing_ok=True)
+            raise
+
+    def _produce_media(self, identity, request, should_stop):
         references = self.db.read_execute(
             "SELECT r.user_id FROM offline_asset_reservations r JOIN offline_selections s ON s.id=r.selection_id WHERE r.asset_id=? AND r.expires_ms>? AND s.state='ready' ORDER BY r.user_id",
             (identity, now_ms()),

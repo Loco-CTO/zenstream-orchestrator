@@ -7871,6 +7871,18 @@
       },
       "OfflineAssetResponse": {
         "properties": {
+          "bundleUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bundleurl"
+          },
           "contentUrl": {
             "anyOf": [
               {
@@ -7992,6 +8004,102 @@
           "state"
         ],
         "title": "OfflineAssetResponse",
+        "type": "object"
+      },
+      "OfflineBundleResponse": {
+        "properties": {
+          "artwork": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Artwork",
+            "type": "array"
+          },
+          "chapters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Chapters",
+            "type": "array"
+          },
+          "itemId": {
+            "title": "Itemid",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "lyrics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lyrics"
+          },
+          "presentationRevision": {
+            "title": "Presentationrevision",
+            "type": "string"
+          },
+          "segments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "stateRevisions": {
+            "additionalProperties": true,
+            "title": "Staterevisions",
+            "type": "object"
+          },
+          "subtitles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Subtitles",
+            "type": "array"
+          },
+          "supplementRevision": {
+            "title": "Supplementrevision",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "itemId",
+          "language",
+          "items",
+          "artwork",
+          "subtitles",
+          "presentationRevision",
+          "supplementRevision"
+        ],
+        "title": "OfflineBundleResponse",
         "type": "object"
       },
       "OfflineCapabilities": {
@@ -29100,6 +29208,92 @@
         ]
       }
     },
+    "/api/offline/assets/{asset_id}/bundle": {
+      "get": {
+        "description": "Get /api/offline/assets/{asset_id}/bundle. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/bundle`.",
+        "operationId": "get_api_offline_assets_by_asset_id_bundle",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested metadata locale; omitted uses the account/server fallback.",
+            "example": "en",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "default": "en",
+              "maxLength": 30,
+              "minLength": 2,
+              "title": "Language",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineBundleResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}/bundle",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
     "/api/offline/assets/{asset_id}/content": {
       "get": {
         "description": "Get /api/offline/assets/{asset_id}/content. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/content`.",
@@ -29473,6 +29667,121 @@
           }
         ],
         "summary": "Head /api/offline/assets/{asset_id}/content",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/assets/{asset_id}/supplements/{index}.vtt": {
+      "get": {
+        "description": "Get /api/offline/assets/{asset_id}/supplements/{index}.vtt. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/supplements/{index}.vtt`.",
+        "operationId": "get_api_offline_assets_by_asset_id_supplements_by_index_vtt",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "index value supplied in the path component.",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/vtt": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "WebVTT subtitle content."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "query",
+                        "page"
+                      ],
+                      "msg": "Input should be greater than or equal to 1",
+                      "type": "greater_than_equal"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Request validation failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The required service or media tool is unavailable."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}/supplements/{index}.vtt",
         "tags": [
           "Offline & Downloads"
         ]

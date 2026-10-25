@@ -2,17 +2,41 @@ from app.config import Config
 from app.foreground import run_control, run_foreground
 from app.offline import OfflineService
 from app.offline_assets import OfflineAssetRequest, OfflineAssets, byte_range
+from app.offline_bundle import bundle, supplement_path
 from app.offline_selections import OfflineSelectionRequest, OfflineSelections
 from app.offline_sync import AccountSyncRequest, AccountSyncService
 from fastapi import APIRouter, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
 
 from api.zenstream.client_routes import _bounded_json_object, _require_account, catalog
 
 router = APIRouter()
+
+
+@router.get("/api/offline/assets/{asset_id}/bundle")
+async def get_offline_bundle(
+    asset_id: str,
+    request: Request,
+    language: str = Query("en", min_length=2, max_length=30),
+):
+    account, _ = await _require_account(request)
+    return await run_foreground(
+        bundle, OfflineAssets(catalog), account["id"], asset_id, language
+    )
+
+
+@router.get("/api/offline/assets/{asset_id}/supplements/{index}.vtt")
+async def get_offline_supplement(asset_id: str, index: int, request: Request):
+    account, _ = await _require_account(request)
+    target = await run_control(
+        supplement_path, OfflineAssets(catalog), account["id"], asset_id, index
+    )
+    return FileResponse(
+        target, media_type="text/vtt", headers={"Cache-Control": "private, no-store"}
+    )
 
 
 @router.post("/api/offline/assets")

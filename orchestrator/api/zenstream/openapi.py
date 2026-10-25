@@ -14,6 +14,7 @@ from copy import deepcopy
 from typing import Any, Literal
 
 from app.offline_assets import OfflineAssetRequest, OfflineAssetResponse
+from app.offline_bundle import OfflineBundleResponse
 from app.offline_selections import OfflineSelectionRequest, OfflineSelectionResponse
 from app.offline_sync import AccountSyncRequest, AccountSyncResponse
 from fastapi import FastAPI
@@ -1543,6 +1544,7 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    OfflineBundleResponse,
     OfflineAssetRequest,
     OfflineAssetResponse,
     OfflineSelectionRequest,
@@ -2715,6 +2717,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("GET", "/api/offline/assets/{asset_id}/bundle"): OfflineBundleResponse,
     ("POST", "/api/offline/assets"): OfflineAssetResponse,
     ("GET", "/api/offline/assets/{asset_id}"): OfflineAssetResponse,
     ("POST", "/api/offline/selections"): OfflineSelectionResponse,

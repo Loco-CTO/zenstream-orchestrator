@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import uuid4
 
+from app.offline_asset_queue import OfflineAssetQueue
 from app.playlists import PlaylistService
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -135,6 +136,8 @@ class OfflineSelections:
             "UPDATE offline_selections SET state='cancelled' WHERE id=? AND user_id=?",
             (identity, user_id),
         )
+        if self.catalog._has_table("offline_assets"):
+            OfflineAssetQueue(self.db).release_selection(user_id, identity)
         return self.get(user_id, identity)
 
     def parents(self, ids):

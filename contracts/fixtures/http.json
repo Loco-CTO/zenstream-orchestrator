@@ -9548,6 +9548,128 @@
       }
     },
     {
+      "operationId": "post_api_offline_assets",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "audioStreamId": 0,
+            "itemId": "fixture-id",
+            "profile": "original",
+            "retry": true,
+            "selectionId": "fixture-id",
+            "sourceId": "fixture-id",
+            "subtitleStreamIndices": [
+              1
+            ]
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/assets",
+        "pathTemplate": "/api/offline/assets"
+      },
+      "response": {
+        "body": {
+          "contentUrl": "x",
+          "durationSeconds": 1.25,
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemId": "fixture-id",
+          "mimeType": "x",
+          "profile": "x",
+          "sha256": "x",
+          "sizeBytes": 1,
+          "sourceId": "fixture-id",
+          "sourceRevision": "x",
+          "state": "x",
+          "trackManifest": [
+            {}
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineAssetResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id",
+        "pathTemplate": "/api/offline/assets/{asset_id}"
+      },
+      "response": {
+        "body": {
+          "contentUrl": "x",
+          "durationSeconds": 1.25,
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemId": "fixture-id",
+          "mimeType": "x",
+          "profile": "x",
+          "sha256": "x",
+          "sizeBytes": 1,
+          "sourceId": "fixture-id",
+          "sourceRevision": "x",
+          "state": "x",
+          "trackManifest": [
+            {}
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineAssetResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_content",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "header": {
+            "If-Range": "x",
+            "Range": "x"
+          },
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/content",
+        "pathTemplate": "/api/offline/assets/{asset_id}/content"
+      },
+      "response": {
+        "body": "fixture-binary-payload",
+        "contentType": "application/octet-stream",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "head_api_offline_assets_by_asset_id_content",
+      "request": {
+        "method": "HEAD",
+        "parameters": {
+          "header": {
+            "If-Range": "x",
+            "Range": "x"
+          },
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/content",
+        "pathTemplate": "/api/offline/assets/{asset_id}/content"
+      },
+      "response": {
+        "status": 200
+      }
+    },
+    {
       "operationId": "get_api_offline_capabilities",
       "request": {
         "method": "GET",
@@ -9612,10 +9734,6 @@
     {
       "operationId": "delete_api_offline_selections_by_selection_id",
       "request": {
-        "body": {
-          "contentType": "application/json",
-          "value": {}
-        },
         "method": "DELETE",
         "parameters": {
           "path": {

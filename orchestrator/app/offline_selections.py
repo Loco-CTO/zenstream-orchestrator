@@ -20,7 +20,10 @@ class OfflineSelectionResponse(BaseModel):
     state: str
     itemCount: int
     items: list[dict] = Field(default_factory=list)
-    metadata: list[dict] = Field(default_factory=list)
+    metadata: list[dict] = Field(
+        default_factory=list,
+        description="Frozen parent metadata, including the selection root on the first page.",
+    )
     nextOffset: int | None = None
     errorCode: str | None = None
 
@@ -55,6 +58,11 @@ class OfflineSelections:
         if pending >= 20:
             raise HTTPException(429, "Too many selections are preparing.")
         identity = str(uuid4())
+        root_snapshot = (
+            self.catalog.items_by_ids(user_id, [request.itemId], request.language)
+            if kind != "playlist"
+            else []
+        )
         with self.db.transaction() as cursor:
             cursor.execute(
                 "INSERT INTO offline_selections(id,user_id,root_id,root_type,language,state,created_at) VALUES(?,?,?,?,?,'enumerating',?)",
@@ -71,6 +79,11 @@ class OfflineSelections:
                 "INSERT INTO offline_selection_frontier(selection_id,entity_id,kind) VALUES(?,?,?)",
                 (identity, request.itemId, kind),
             )
+            for item in root_snapshot:
+                cursor.execute(
+                    "INSERT INTO offline_selection_metadata(selection_id,entity_id,payload) VALUES(?,?,?)",
+                    (identity, item["id"], json.dumps(item)),
+                )
         return self.get(user_id, identity)
 
     def _owned(self, user_id, identity):
@@ -88,7 +101,7 @@ class OfflineSelections:
         return root, kind, language, state, error
 
     def get(self, user_id, identity, offset=0):
-        _, _, language, state, error = self._owned(user_id, identity)
+        root, kind, language, state, error = self._owned(user_id, identity)
         total = self.db.read_execute(
             "SELECT count(*) FROM offline_selection_items i JOIN library_entities e ON e.id=i.entity_id JOIN user_library_access a ON a.library_id=e.library_id AND a.user_id=? WHERE i.selection_id=?",
             (user_id, identity),
@@ -102,6 +115,8 @@ class OfflineSelections:
             )
             items = [json.loads(row[1]) for row in rows]
             parent_ids = self.parents([row[0] for row in rows])
+            if offset == 0 and kind != "playlist" and root not in parent_ids:
+                parent_ids.append(root)
             for start in range(0, len(parent_ids), 100):
                 batch = parent_ids[start : start + 100]
                 marks = ",".join("?" for _ in batch)

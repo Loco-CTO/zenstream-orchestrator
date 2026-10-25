@@ -9658,6 +9658,9 @@
           "chapters": [
             {}
           ],
+          "episodeNeighbors": {
+            "fixtureKey": "x"
+          },
           "itemId": "fixture-id",
           "items": [
             {}
@@ -9758,6 +9761,7 @@
           "features": [
             "x"
           ],
+          "hdrToneMapping": true,
           "maxBatchSize": 1,
           "profiles": [
             "x"
@@ -9767,6 +9771,51 @@
         },
         "contentType": "application/json",
         "schemaRef": "#/components/schemas/OfflineCapabilities",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "post_api_offline_reconcile",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "language": "xx",
+            "objects": [
+              {
+                "id": "fixture-id",
+                "kind": "catalog",
+                "libraryId": "fixture-id",
+                "offset": 0,
+                "presentationRevision": "x",
+                "sourceId": "fixture-id",
+                "sourceRevision": "x"
+              }
+            ],
+            "serverInstanceId": "fixture-id"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/reconcile",
+        "pathTemplate": "/api/offline/reconcile"
+      },
+      "response": {
+        "body": {
+          "historyEpoch": 1,
+          "libraryAccess": {
+            "fixtureKey": true
+          },
+          "objects": [
+            {}
+          ],
+          "privacyEpoch": 1,
+          "serverInstanceId": "fixture-id",
+          "serverTime": "2026-09-29T12:00:00Z",
+          "watchHistoryEnabled": true
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineReconcileResponse",
         "status": 200
       }
     },

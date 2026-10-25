@@ -38,6 +38,10 @@ class OfflineAudioConversionTest(unittest.TestCase):
                 "flac",
                 "-metadata",
                 "REPLAYGAIN_TRACK_GAIN=-4.5 dB",
+                "-metadata",
+                "LANGUAGE=jpn",
+                "-metadata",
+                "TITLE=Japanese FLAC",
                 str(cls.path),
             ],
             timeout_seconds=30,
@@ -75,6 +79,11 @@ class OfflineAudioConversionTest(unittest.TestCase):
                 self.assertEqual(int(audio["sample_rate"]), 48000)
                 self.assertAlmostEqual(result["durationSeconds"], 1, delta=0.1)
                 self.assertEqual(result["mimeType"], "audio/mp4")
+                self.assertEqual(audio["tags"]["language"], "jpn")
+                manifest = result["trackManifest"][0]
+                self.assertEqual(manifest["language"], "jpn")
+                self.assertEqual(manifest["displayTitle"], "Japanese FLAC")
+                self.assertEqual(manifest["sourceIndex"], 0)
                 self.assertEqual(
                     result["replayGain"]["replaygain_track_gain"], "-4.5 dB"
                 )

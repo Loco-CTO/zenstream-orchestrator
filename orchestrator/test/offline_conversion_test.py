@@ -43,6 +43,10 @@ class OfflineVideoConversionTest(unittest.TestCase):
                 "2",
                 "-c:a",
                 "aac",
+                "-metadata:s:a:0",
+                "language=jpn",
+                "-metadata:s:a:0",
+                "handler_name=Japanese",
                 str(cls.path),
             ],
             timeout_seconds=30,
@@ -82,6 +86,16 @@ class OfflineVideoConversionTest(unittest.TestCase):
         self.assertEqual((video["width"], video["height"]), (320, 180))
         self.assertEqual(video["codec_name"], "h264")
         self.assertEqual(result["mimeType"], "video/mp4")
+        audio = next(
+            track for track in result["trackManifest"] if track["type"] == "audio"
+        )
+        self.assertEqual(audio["language"], "jpn")
+        self.assertEqual(audio["displayTitle"], "Japanese")
+        self.assertEqual(audio["sourceIndex"], 1)
+        output_audio = next(
+            stream for stream in probe["streams"] if stream["codec_type"] == "audio"
+        )
+        self.assertEqual(output_audio["tags"]["language"], "jpn")
         pixels = run_ffmpeg(
             [
                 ffmpeg_path(),

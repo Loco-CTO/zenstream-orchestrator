@@ -5,7 +5,7 @@ import shutil
 import threading
 import time
 
-from app.ffmpeg_supervisor import FFmpegCancelled, run_ffmpeg
+from app.ffmpeg_supervisor import FFmpegCancelled, FFmpegError, run_ffmpeg
 from app.offline_asset_queue import prepared_limit
 from app.playback import ffmpeg_path, ffprobe_path
 from fastapi import HTTPException
@@ -23,15 +23,19 @@ def conversion_capabilities():
         executable = ffmpeg_path()
         result = {"video": False, "audio": False, "toneMapping": False}
         if executable and ffprobe_path():
-            encoders = run_ffmpeg(
-                [executable, "-hide_banner", "-encoders"], timeout_seconds=10
-            ).decode("utf-8", "replace")
-            filters = run_ffmpeg(
-                [executable, "-hide_banner", "-filters"], timeout_seconds=10
-            ).decode("utf-8", "replace")
-            result["audio"] = " aac " in encoders
-            result["video"] = " libx264 " in encoders and result["audio"]
-            result["toneMapping"] = " zscale " in filters and " tonemap " in filters
+            try:
+                encoders = run_ffmpeg(
+                    [executable, "-hide_banner", "-encoders"], timeout_seconds=10
+                ).decode("utf-8", "replace")
+                filters = run_ffmpeg(
+                    [executable, "-hide_banner", "-filters"], timeout_seconds=10
+                ).decode("utf-8", "replace")
+                result["audio"] = " aac " in encoders
+                result["video"] = " libx264 " in encoders and result["audio"]
+                result["toneMapping"] = " zscale " in filters and " tonemap " in filters
+            except (OSError, FFmpegError):
+                # Original downloads remain available when conversion tools fail.
+                pass
         _capabilities = result
         _capability_time = time.monotonic()
         return dict(result)
@@ -86,6 +90,44 @@ def audio_index(source, requested):
         ),
         tracks[0]["index"],
     )
+
+
+def audio_track_tags(source, selected):
+    stream = next(
+        (
+            item
+            for item in source["probe"].get("streams", [])
+            if item.get("index") == selected
+        ),
+        {},
+    )
+    tags = {str(key).lower(): value for key, value in stream.get("tags", {}).items()}
+    if not source.get("videoCodec"):
+        for key, value in source["probe"].get("format", {}).get("tags", {}).items():
+            tags.setdefault(str(key).lower(), value)
+    title = tags.get("title")
+    if not title and tags.get("handler_name") not in {
+        None,
+        "SoundHandler",
+        "AudioHandler",
+    }:
+        title = tags.get("handler_name")
+    values = {"language": tags.get("language"), "title": title}
+    return {
+        key: str(value)
+        for key, value in values.items()
+        if value is not None and 0 < len(str(value)) <= 128
+    }
+
+
+def audio_metadata_args(source, selected):
+    tags = audio_track_tags(source, selected)
+    result = []
+    if "language" in tags:
+        result.extend(["-metadata:s:a:0", f"language={tags['language']}"])
+    if "title" in tags:
+        result.extend(["-metadata:s:a:0", f"handler_name={tags['title']}"])
+    return result
 
 
 def video_command(source, request, target):
@@ -172,6 +214,8 @@ def video_command(source, request, target):
             str(target),
         ]
     )
+    if selected is not None:
+        command[-1:-1] = audio_metadata_args(source, selected)
     return command
 
 
@@ -232,6 +276,7 @@ def audio_command(source, request, target):
                 and len(str(value)) <= 64
             ):
                 command.extend(["-metadata", f"{key.lower()}={value}"])
+    command.extend(audio_metadata_args(source, selected))
     command.extend(["-movflags", "+faststart", "-f", "mp4", str(target)])
     return command
 
@@ -335,9 +380,14 @@ def prepare_video(
         temporary.replace(final)
         tracks = assets.tracks({"probe": probe})
         selected = audio_index(source, request.get("audioStreamId"))
+        selected_tags = audio_track_tags(source, selected)
         for track in tracks:
             if track["type"] == "audio":
                 track["sourceIndex"] = selected
+                if "language" in selected_tags:
+                    track["language"] = selected_tags["language"]
+                if "title" in selected_tags:
+                    track["displayTitle"] = selected_tags["title"]
         return {
             "storageName": final.name,
             "sizeBytes": size,

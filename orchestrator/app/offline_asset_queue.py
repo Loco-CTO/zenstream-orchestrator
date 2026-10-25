@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import time
+from itertools import islice
 from pathlib import Path
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ class OfflineAssetQueue:
             if cache_directory
             else metadata_directory() / "offline-prepared-cache"
         )
+        self._orphan_scan = None
 
     def enqueue(self, user_id, selection_id, request, *, retry=False):
         encoded = json.dumps(request, sort_keys=True, separators=(",", ":"))
@@ -120,7 +122,11 @@ class OfflineAssetQueue:
                 return True
             current = now_ms()
             if current - last_check >= 1000:
-                cancelled = not self.active(identity)
+                owned = self.db.read_execute(
+                    "SELECT 1 FROM offline_assets WHERE id=? AND worker_id=? AND state='preparing'",
+                    (identity, worker),
+                )
+                cancelled = not owned or not self.active(identity)
                 if not cancelled:
                     self.db.execute(
                         "UPDATE offline_assets SET lease_until=? WHERE id=? AND worker_id=?",
@@ -188,3 +194,43 @@ class OfflineAssetQueue:
                 "DELETE FROM offline_assets WHERE id=? AND NOT EXISTS (SELECT 1 FROM offline_asset_reservations WHERE asset_id=?)",
                 (identity, identity),
             )
+        self._cleanup_orphans(now)
+
+    def _cleanup_orphans(self, now):
+        if not self.cache_directory.is_dir():
+            return
+        if self._orphan_scan is None:
+            self._orphan_scan = self.cache_directory.iterdir()
+        candidates = list(islice(self._orphan_scan, 100))
+        if len(candidates) < 100:
+            self._orphan_scan = None
+        for target in candidates:
+            identity = target.name.split(".")[0]
+            if len(identity) != 64 or any(
+                c not in "0123456789abcdef" for c in identity
+            ):
+                continue
+            try:
+                if (
+                    not target.is_file()
+                    or target.stat().st_mtime * 1000 > now - 86400000
+                ):
+                    continue
+                rows = self.db.read_execute(
+                    "SELECT state,result_json FROM offline_assets WHERE id=?",
+                    (identity,),
+                )
+                if rows and rows[0][0] in {"queued", "preparing"}:
+                    continue
+                result = json.loads(rows[0][1] or "{}") if rows else {}
+                retained = {result.get("storageName")}
+                retained.update(
+                    item.get("storageName") for item in result.get("supplements", [])
+                )
+                if (
+                    target.name not in retained
+                    and target.resolve().parent == self.cache_directory.resolve()
+                ):
+                    target.unlink(missing_ok=True)
+            except FileNotFoundError:
+                continue

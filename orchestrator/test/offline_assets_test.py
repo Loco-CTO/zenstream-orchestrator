@@ -79,6 +79,28 @@ class OfflineOriginalAssetTest(OfflineAssetQueueTest):
         self.assertNotIn(str(self.path), str(result))
         self.assertNotIn("filename", str(result))
 
+    def test_video_manifest_preserves_hdr_recovery_restrictions(self):
+        tracks = OfflineAssets.tracks(
+            {
+                "probe": {
+                    "streams": [
+                        {
+                            "index": 0,
+                            "codec_type": "video",
+                            "codec_name": "hevc",
+                            "color_transfer": "smpte2084",
+                            "color_primaries": "bt2020",
+                        },
+                        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                    ]
+                }
+            }
+        )
+        self.assertTrue(tracks[0]["isHdr"])
+        self.assertEqual(tracks[0]["colorTransfer"], "smpte2084")
+        self.assertEqual(tracks[0]["colorPrimaries"], "bt2020")
+        self.assertNotIn("isHdr", tracks[1])
+
     def test_range_delivery_and_head_match(self):
         result = self.prepare()
         client = self.client()

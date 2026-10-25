@@ -12,7 +12,11 @@ from app.offline import OfflineService
 
 
 class OfflineIdentityTest(unittest.TestCase):
-    def test_capabilities_do_not_advertise_incomplete_features(self):
+    @patch(
+        "app.offline_conversion.conversion_capabilities",
+        return_value={"video": False, "audio": False, "toneMapping": False},
+    )
+    def test_capabilities_advertise_originals_without_conversion_tools(self, _caps):
         db = DatabaseHandler("sqlite", {}, ":memory:")
         self.addCleanup(db.close)
         db.execute(
@@ -24,9 +28,9 @@ class OfflineIdentityTest(unittest.TestCase):
         self.assertEqual(
             first["serverInstanceId"], service.capabilities()["serverInstanceId"]
         )
-        self.assertFalse(first["enabled"])
-        self.assertEqual(first["profiles"], [])
-        self.assertEqual(first["features"], [])
+        self.assertTrue(first["enabled"])
+        self.assertEqual(first["profiles"], ["original"])
+        self.assertIn("reconcile", first["features"])
         self.assertNotIn("secret", str(first).lower())
 
     def test_migration_creates_distinct_valid_identities_and_is_reversible(self):

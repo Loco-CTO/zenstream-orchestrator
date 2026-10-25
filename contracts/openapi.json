@@ -7987,6 +7987,7 @@
             "type": "string"
           },
           "trackManifest": {
+            "description": "Output stream indexes and selected track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -8023,6 +8024,28 @@
             },
             "title": "Chapters",
             "type": "array"
+          },
+          "episodeNeighbors": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Episodeneighbors"
           },
           "itemId": {
             "title": "Itemid",
@@ -8121,6 +8144,10 @@
             "title": "Features",
             "type": "array"
           },
+          "hdrToneMapping": {
+            "title": "Hdrtonemapping",
+            "type": "boolean"
+          },
           "maxBatchSize": {
             "maximum": 100,
             "minimum": 1,
@@ -8156,9 +8183,172 @@
           "enabled",
           "features",
           "profiles",
+          "hdrToneMapping",
           "maxBatchSize"
         ],
         "title": "OfflineCapabilities",
+        "type": "object"
+      },
+      "OfflineKnownObject": {
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "catalog",
+            "enum": [
+              "catalog",
+              "playlist"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "presentationRevision": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Presentationrevision"
+          },
+          "sourceId": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sourceid"
+          },
+          "sourceRevision": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sourcerevision"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "OfflineKnownObject",
+        "type": "object"
+      },
+      "OfflineReconcileRequest": {
+        "properties": {
+          "language": {
+            "default": "en",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Language",
+            "type": "string"
+          },
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/OfflineKnownObject"
+            },
+            "maxItems": 100,
+            "title": "Objects",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Serverinstanceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId"
+        ],
+        "title": "OfflineReconcileRequest",
+        "type": "object"
+      },
+      "OfflineReconcileResponse": {
+        "properties": {
+          "historyEpoch": {
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "libraryAccess": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Libraryaccess",
+            "type": "object"
+          },
+          "objects": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Objects",
+            "type": "array"
+          },
+          "privacyEpoch": {
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "serverInstanceId": {
+            "title": "Serverinstanceid",
+            "type": "string"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          },
+          "watchHistoryEnabled": {
+            "title": "Watchhistoryenabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "serverTime",
+          "historyEpoch",
+          "privacyEpoch",
+          "watchHistoryEnabled",
+          "libraryAccess",
+          "objects"
+        ],
+        "title": "OfflineReconcileResponse",
         "type": "object"
       },
       "OfflineSelectionRequest": {
@@ -8223,6 +8413,7 @@
             "type": "array"
           },
           "metadata": {
+            "description": "Frozen parent metadata, including the selection root on the first page.",
             "items": {
               "additionalProperties": true,
               "type": "object"
@@ -29138,7 +29329,7 @@
     },
     "/api/offline/assets/{asset_id}": {
       "get": {
-        "description": "Get /api/offline/assets/{asset_id}. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}`.",
+        "description": "Download preparation status and immutable output manifest, including video color metadata and HDR recovery restrictions.",
         "operationId": "get_api_offline_assets_by_asset_id",
         "parameters": [
           {
@@ -29842,6 +30033,96 @@
           }
         ],
         "summary": "Get /api/offline/capabilities",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/reconcile": {
+      "post": {
+        "description": "Post /api/offline/reconcile. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `POST`; path: `/api/offline/reconcile`.",
+        "operationId": "post_api_offline_reconcile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineReconcileRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineReconcileResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/offline/reconcile",
         "tags": [
           "Offline & Downloads"
         ]

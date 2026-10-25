@@ -42,7 +42,10 @@ class OfflineAssetResponse(BaseModel):
     sha256: str | None = None
     mimeType: str | None = None
     durationSeconds: float | None = None
-    trackManifest: list[dict] = Field(default_factory=list)
+    trackManifest: list[dict] = Field(
+        default_factory=list,
+        description="Output stream indexes and selected track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
+    )
     replayGain: dict[str, str] = Field(default_factory=dict)
     errorCode: str | None = None
 
@@ -109,7 +112,7 @@ class OfflineAssets:
             "sourceId": source["id"],
             "sourceRevision": source["revision"],
             "profile": body.profile,
-            "profileVersion": 1,
+            "profileVersion": 1 if body.profile == "original" else 2,
         }
         if body.profile != "original":
             normalized["audioStreamId"] = audio_index(source, body.audioStreamId)
@@ -169,6 +172,16 @@ class OfflineAssets:
                 "language": stream.get("tags", {}).get("language"),
                 "displayTitle": stream.get("tags", {}).get("title"),
                 "isDefault": bool(stream.get("disposition", {}).get("default")),
+                **(
+                    {
+                        "colorTransfer": stream.get("color_transfer"),
+                        "colorPrimaries": stream.get("color_primaries"),
+                        "isHdr": stream.get("color_transfer")
+                        in {"smpte2084", "arib-std-b67"},
+                    }
+                    if stream.get("codec_type") == "video"
+                    else {}
+                ),
             }
             for index, stream in enumerate(source["probe"].get("streams", []))
             if stream.get("codec_type") in {"audio", "video", "subtitle"}

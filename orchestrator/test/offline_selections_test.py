@@ -4,6 +4,17 @@ from test.playlists_test import PlaylistServiceTest
 
 
 class OfflineSelectionTest(PlaylistServiceTest):
+    def test_non_parent_collection_root_is_snapshotted(self):
+        self._entity("collection", "collection", None)
+        self.db.execute(
+            "CREATE TABLE collection_members(collection_entity_id TEXT,source_entity_id TEXT)"
+        )
+        self.db.execute("INSERT INTO collection_members VALUES('collection','movie')")
+        self.db.execute("INSERT INTO media_files VALUES('movie','media')")
+        result = self.prepare("collection")
+        self.assertEqual([item["id"] for item in result["items"]], ["movie"])
+        self.assertIn("collection", {item["id"] for item in result["metadata"]})
+
     def setUp(self):
         super().setUp()
         for sql in (

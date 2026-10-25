@@ -123,7 +123,7 @@ def apply_playlist(sync, user_id, operation):
     _layout(db, user_id, target)
     sync._stamp(user_id, operation, field)
     db.execute(
-        "UPDATE user_playlists SET updated_at=? WHERE id=? AND user_id=?",
+        "UPDATE user_playlists SET updated_at=MAX(updated_at,?) WHERE id=? AND user_id=?",
         (at, target, user_id),
     )
     return "applied"

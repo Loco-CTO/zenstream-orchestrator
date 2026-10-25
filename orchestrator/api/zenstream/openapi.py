@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from app.offline_assets import OfflineAssetRequest, OfflineAssetResponse
 from app.offline_bundle import OfflineBundleResponse
+from app.offline_reconcile import OfflineReconcileRequest, OfflineReconcileResponse
 from app.offline_selections import OfflineSelectionRequest, OfflineSelectionResponse
 from app.offline_sync import AccountSyncRequest, AccountSyncResponse
 from fastapi import FastAPI
@@ -42,6 +43,7 @@ class OfflineCapabilities(DocsModel):
     enabled: bool
     features: list[str]
     profiles: list[str]
+    hdrToneMapping: bool
     maxBatchSize: int = Field(ge=1, le=100)
 
 
@@ -1544,6 +1546,8 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    OfflineReconcileRequest,
+    OfflineReconcileResponse,
     OfflineBundleResponse,
     OfflineAssetRequest,
     OfflineAssetResponse,
@@ -2474,6 +2478,8 @@ def _tag_for_path(path: str) -> str:
 
 
 def _description_for(tag: str, method: str, path: str, summary: str) -> str:
+    if path == "/api/offline/assets/{asset_id}" and method == "GET":
+        return "Download preparation status and immutable output manifest, including video color metadata and HDR recovery restrictions."
     details = {
         "Offline & Downloads": "Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions.",
         "System & Client Bootstrap": "Use this endpoint during client startup or registration.",
@@ -2572,6 +2578,7 @@ def _error_responses(statuses: tuple[int, ...]) -> dict[str, Any]:
 
 
 _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/reconcile"): OfflineReconcileRequest,
     ("POST", "/api/offline/assets"): OfflineAssetRequest,
     ("POST", "/api/offline/selections"): OfflineSelectionRequest,
     ("POST", "/api/account/sync"): AccountSyncRequest,
@@ -2717,6 +2724,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/reconcile"): OfflineReconcileResponse,
     ("GET", "/api/offline/assets/{asset_id}/bundle"): OfflineBundleResponse,
     ("POST", "/api/offline/assets"): OfflineAssetResponse,
     ("GET", "/api/offline/assets/{asset_id}"): OfflineAssetResponse,

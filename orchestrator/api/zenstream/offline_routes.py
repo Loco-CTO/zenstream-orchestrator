@@ -3,6 +3,7 @@ from app.foreground import run_control, run_foreground
 from app.offline import OfflineService
 from app.offline_assets import OfflineAssetRequest, OfflineAssets, byte_range
 from app.offline_bundle import bundle, supplement_path
+from app.offline_reconcile import OfflineReconciler, OfflineReconcileRequest
 from app.offline_selections import OfflineSelectionRequest, OfflineSelections
 from app.offline_sync import AccountSyncRequest, AccountSyncService
 from fastapi import APIRouter, Query, Request
@@ -14,6 +15,20 @@ from starlette.background import BackgroundTask
 from api.zenstream.client_routes import _bounded_json_object, _require_account, catalog
 
 router = APIRouter()
+
+
+@router.post("/api/offline/reconcile")
+async def reconcile_offline_objects(request: Request):
+    account, _ = await _require_account(request)
+    try:
+        body = OfflineReconcileRequest.model_validate(
+            await _bounded_json_object(request, limit=262144)
+        )
+    except ValidationError as error:
+        raise RequestValidationError(error.errors()) from error
+    return await run_foreground(
+        OfflineReconciler(catalog).reconcile, account["id"], body
+    )
 
 
 @router.get("/api/offline/assets/{asset_id}/bundle")

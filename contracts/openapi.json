@@ -10155,7 +10155,14 @@
               "favorite",
               "unfavorite",
               "follow",
-              "unfollow"
+              "unfollow",
+              "playlist_create",
+              "playlist_name",
+              "playlist_description",
+              "playlist_delete",
+              "playlist_add",
+              "playlist_remove",
+              "playlist_order"
             ],
             "title": "Kind",
             "type": "string"

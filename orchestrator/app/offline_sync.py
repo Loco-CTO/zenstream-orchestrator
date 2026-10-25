@@ -6,6 +6,8 @@ from uuid import UUID
 
 from app.account_sync import epochs, field_revision
 from app.notifications import FollowService
+from app.offline_playlists import apply_playlist, playlist_field
+from app.playlists import PlaylistService
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -24,6 +26,13 @@ class SyncOperation(BaseModel):
         "unfavorite",
         "follow",
         "unfollow",
+        "playlist_create",
+        "playlist_name",
+        "playlist_description",
+        "playlist_delete",
+        "playlist_add",
+        "playlist_remove",
+        "playlist_order",
     ]
     targetId: str = Field(min_length=1, max_length=200)
     activityMs: int = Field(ge=0)
@@ -99,7 +108,7 @@ class AccountSyncService:
                         "INSERT INTO account_sync_devices(user_id,device_id,sequence) VALUES(?,?,?) ON CONFLICT(user_id,device_id) DO UPDATE SET sequence=excluded.sequence",
                         (user_id, batch.deviceId, operation.sequence),
                     )
-                state = self._canonical(user_id, operation.targetId)
+                state = self._canonical(user_id, operation)
                 acknowledgements.append(
                     {
                         "id": str(operation.id),
@@ -120,8 +129,20 @@ class AccountSyncService:
             "acknowledgements": acknowledgements,
         }
 
-    def _canonical(self, user_id, target_id):
+    def _canonical(self, user_id, operation):
+        target_id = operation.targetId
         try:
+            if operation.kind.startswith("playlist_"):
+                state = PlaylistService(self.catalog).get_summary(
+                    user_id, target_id, "en"
+                )
+                if operation.kind == "playlist_add":
+                    rows = self.db.read_execute(
+                        "SELECT id FROM user_playlist_items WHERE playlist_id=? AND entity_id=?",
+                        (target_id, operation.payload.get("trackId")),
+                    )
+                    state["entryId"] = rows[0][0] if rows else None
+                return state
             self.catalog.require_entity(user_id, target_id)
             return self.catalog._state(user_id, target_id)
         except HTTPException as error:
@@ -131,6 +152,8 @@ class AccountSyncService:
 
     @staticmethod
     def _field(operation):
+        if operation.kind.startswith("playlist_"):
+            return playlist_field(operation)
         if operation.kind in {"favorite", "unfavorite"}:
             return "favorite"
         if operation.kind in {"follow", "unfollow"}:
@@ -183,6 +206,8 @@ class AccountSyncService:
         return "applied"
 
     def _apply(self, user_id, operation):
+        if operation.kind.startswith("playlist_"):
+            return apply_playlist(self, user_id, operation)
         entity = self.catalog.require_entity(user_id, operation.targetId)
         field = self._field(operation)
         if field != "playback":

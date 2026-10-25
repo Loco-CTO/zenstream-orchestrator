@@ -7822,7 +7822,9 @@
             "enum": [
               "original",
               "video-720p",
-              "video-1080p"
+              "video-1080p",
+              "audio-128k",
+              "audio-256k"
             ],
             "title": "Profile",
             "type": "string"
@@ -7928,6 +7930,13 @@
           "profile": {
             "title": "Profile",
             "type": "string"
+          },
+          "replayGain": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Replaygain",
+            "type": "object"
           },
           "sha256": {
             "anyOf": [

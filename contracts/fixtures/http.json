@@ -9578,6 +9578,9 @@
           "itemId": "fixture-id",
           "mimeType": "x",
           "profile": "x",
+          "replayGain": {
+            "fixtureKey": "x"
+          },
           "sha256": "x",
           "sizeBytes": 1,
           "sourceId": "fixture-id",
@@ -9613,6 +9616,9 @@
           "itemId": "fixture-id",
           "mimeType": "x",
           "profile": "x",
+          "replayGain": {
+            "fixtureKey": "x"
+          },
           "sha256": "x",
           "sizeBytes": 1,
           "sourceId": "fixture-id",

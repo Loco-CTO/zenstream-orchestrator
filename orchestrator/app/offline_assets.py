@@ -8,6 +8,7 @@ from app.offline_conversion import (
     audio_index,
     conversion_capabilities,
     is_hdr,
+    prepare_audio,
     prepare_video,
 )
 from app.playback import PlaybackManager
@@ -19,7 +20,9 @@ class OfflineAssetRequest(BaseModel):
     selectionId: str = Field(min_length=1, max_length=200)
     itemId: str = Field(min_length=1, max_length=200)
     sourceId: str | None = Field(default=None, max_length=200)
-    profile: Literal["original", "video-720p", "video-1080p"] = "original"
+    profile: Literal[
+        "original", "video-720p", "video-1080p", "audio-128k", "audio-256k"
+    ] = "original"
     audioStreamId: int | None = Field(default=None, ge=0)
     subtitleStreamIndices: list[int] = Field(default_factory=list, max_length=8)
     retry: bool = False
@@ -38,6 +41,7 @@ class OfflineAssetResponse(BaseModel):
     mimeType: str | None = None
     durationSeconds: float | None = None
     trackManifest: list[dict] = Field(default_factory=list)
+    replayGain: dict[str, str] = Field(default_factory=dict)
     errorCode: str | None = None
 
 
@@ -82,6 +86,12 @@ class OfflineAssets:
 
     def request(self, user_id, body):
         source = self.source(user_id, body.itemId, body.sourceId)
+        if body.profile.startswith("audio-"):
+            entity = self.catalog.require_entity(user_id, body.itemId)
+            if entity[3] != "track" or not conversion_capabilities()["audio"]:
+                raise HTTPException(
+                    409, "The requested compact audio profile is unavailable."
+                )
         if body.profile.startswith("video-"):
             capabilities = conversion_capabilities()
             if (
@@ -142,6 +152,9 @@ class OfflineAssets:
                 "index": stream.get("index", index),
                 "type": stream.get("codec_type"),
                 "codec": stream.get("codec_name"),
+                "channels": stream.get("channels"),
+                "sampleRate": stream.get("sample_rate"),
+                "bitrate": stream.get("bit_rate"),
                 "language": stream.get("tags", {}).get("language"),
                 "displayTitle": stream.get("tags", {}).get("title"),
                 "isDefault": bool(stream.get("disposition", {}).get("default")),
@@ -169,6 +182,8 @@ class OfflineAssets:
             raise HTTPException(409, "Source changed.")
         if request["profile"].startswith("video-"):
             return prepare_video(self, identity, source, request, should_stop)
+        if request["profile"].startswith("audio-"):
+            return prepare_audio(self, identity, source, request, should_stop)
         if request["profile"] != "original":
             raise HTTPException(409, "Download profile unavailable.")
         digest = hashlib.sha256()

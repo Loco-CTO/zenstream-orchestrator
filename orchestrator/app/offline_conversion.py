@@ -175,11 +175,115 @@ def video_command(source, request, target):
     return command
 
 
-def prepare_video(assets, identity, source, request, should_stop):
+def audio_command(source, request, target):
+    if not conversion_capabilities()["audio"]:
+        raise HTTPException(409, "Compact audio conversion is unavailable.")
+    selected = audio_index(source, request.get("audioStreamId"))
+    if selected is None:
+        raise HTTPException(409, "Audio stream is unavailable.")
+    track = next(
+        stream
+        for stream in source["probe"]["streams"]
+        if stream.get("index") == selected
+    )
+    rate = int(track.get("sample_rate") or 48000)
+    if rate not in {8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000}:
+        rate = 48000
+    bitrate = "128k" if request["profile"] == "audio-128k" else "256k"
+    command = [
+        ffmpeg_path(),
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source["path"]),
+        "-map",
+        f"0:{selected}",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-vn",
+        "-sn",
+        "-c:a",
+        "aac",
+        "-b:a",
+        bitrate,
+        "-ac",
+        "2",
+        "-ar",
+        str(rate),
+        "-threads",
+        "2",
+    ]
+    if int(track.get("channels") or 2) <= 2:
+        tags = source["probe"].get("format", {}).get("tags", {})
+        for key, value in tags.items():
+            if (
+                key.lower()
+                in {
+                    "replaygain_track_gain",
+                    "replaygain_track_peak",
+                    "replaygain_album_gain",
+                    "replaygain_album_peak",
+                }
+                and len(str(value)) <= 64
+            ):
+                command.extend(["-metadata", f"{key.lower()}={value}"])
+    command.extend(["-movflags", "+faststart", "-f", "mp4", str(target)])
+    return command
+
+
+def prepare_audio(assets, identity, source, request, should_stop):
+    result = prepare_video(
+        assets,
+        identity,
+        source,
+        request,
+        should_stop,
+        command_builder=audio_command,
+        suffix=".m4a",
+        mime_type="audio/mp4",
+    )
+    selected = audio_index(source, request.get("audioStreamId"))
+    track = next(
+        stream
+        for stream in source["probe"]["streams"]
+        if stream.get("index") == selected
+    )
+    if int(track.get("channels") or 2) <= 2:
+        result["replayGain"] = {
+            key.lower(): str(value)
+            for key, value in source["probe"].get("format", {}).get("tags", {}).items()
+            if key.lower()
+            in {
+                "replaygain_track_gain",
+                "replaygain_track_peak",
+                "replaygain_album_gain",
+                "replaygain_album_peak",
+            }
+            and len(str(value)) <= 64
+        }
+    return result
+
+
+def prepare_video(
+    assets,
+    identity,
+    source,
+    request,
+    should_stop,
+    *,
+    command_builder=video_command,
+    suffix=".mp4",
+    mime_type="video/mp4",
+):
     cache = assets.queue.cache_directory
     cache.mkdir(parents=True, exist_ok=True)
-    temporary = cache / (identity + ".mp4.part")
-    final = cache / (identity + ".mp4")
+    temporary = cache / (identity + suffix + ".part")
+    final = cache / (identity + suffix)
     limit = prepared_limit()
     rows = assets.db.read_execute(
         "SELECT COALESCE(SUM(json_extract(result_json,'$.sizeBytes')),0) FROM offline_assets WHERE result_json IS NOT NULL AND json_extract(result_json,'$.storageName') IS NOT NULL"
@@ -198,7 +302,7 @@ def prepare_video(assets, identity, source, request, should_stop):
     try:
         try:
             run_ffmpeg(
-                video_command(source, request, temporary),
+                command_builder(source, request, temporary),
                 should_terminate=terminate,
                 timeout_seconds=21600,
             )
@@ -238,7 +342,7 @@ def prepare_video(assets, identity, source, request, should_stop):
             "storageName": final.name,
             "sizeBytes": size,
             "sha256": digest.hexdigest(),
-            "mimeType": "video/mp4",
+            "mimeType": mime_type,
             "durationSeconds": duration,
             "trackManifest": tracks,
         }

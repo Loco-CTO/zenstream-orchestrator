@@ -3893,11 +3893,14 @@ class Catalog:
         return result
 
     def clear_watch_history(self, user_id: str) -> None:
+        from app.account_sync import clear_history_barrier
+
         has_user_summary = self._has_table("catalog_user_summary")
         has_legacy_rollups = self._has_table("catalog_user_rollups")
         has_play_events = self._has_table("user_play_events")
         now = _now()
         with self.db.transaction() as cursor:
+            clear_history_barrier(self.db, user_id)
             if has_play_events:
                 cursor.execute(
                     "DELETE FROM user_play_events WHERE user_id=?", (user_id,)

@@ -4,6 +4,12 @@ import os
 from typing import Literal
 
 from app.offline_asset_queue import OfflineAssetQueue, now_ms
+from app.offline_conversion import (
+    audio_index,
+    conversion_capabilities,
+    is_hdr,
+    prepare_video,
+)
 from app.playback import PlaybackManager
 from fastapi import HTTPException
 from pydantic import BaseModel, Field
@@ -13,7 +19,7 @@ class OfflineAssetRequest(BaseModel):
     selectionId: str = Field(min_length=1, max_length=200)
     itemId: str = Field(min_length=1, max_length=200)
     sourceId: str | None = Field(default=None, max_length=200)
-    profile: Literal["original"] = "original"
+    profile: Literal["original", "video-720p", "video-1080p"] = "original"
     audioStreamId: int | None = Field(default=None, ge=0)
     subtitleStreamIndices: list[int] = Field(default_factory=list, max_length=8)
     retry: bool = False
@@ -76,6 +82,16 @@ class OfflineAssets:
 
     def request(self, user_id, body):
         source = self.source(user_id, body.itemId, body.sourceId)
+        if body.profile.startswith("video-"):
+            capabilities = conversion_capabilities()
+            if (
+                not source.get("videoCodec")
+                or not capabilities["video"]
+                or (is_hdr(source) and not capabilities["toneMapping"])
+            ):
+                raise HTTPException(
+                    409, "The requested portable video profile is unavailable."
+                )
         normalized = {
             "entityId": body.itemId,
             "sourceId": source["id"],
@@ -83,6 +99,8 @@ class OfflineAssets:
             "profile": body.profile,
             "profileVersion": 1,
         }
+        if body.profile != "original":
+            normalized["audioStreamId"] = audio_index(source, body.audioStreamId)
         identity = self.queue.enqueue(
             user_id, body.selectionId, normalized, retry=body.retry
         )
@@ -149,6 +167,8 @@ class OfflineAssets:
             raise InterruptedError("No authorized reservation remains")
         if source["revision"] != request["sourceRevision"]:
             raise HTTPException(409, "Source changed.")
+        if request["profile"].startswith("video-"):
+            return prepare_video(self, identity, source, request, should_stop)
         if request["profile"] != "original":
             raise HTTPException(409, "Download profile unavailable.")
         digest = hashlib.sha256()
@@ -175,6 +195,18 @@ class OfflineAssets:
             raise HTTPException(409, "Download asset is not ready.")
         request = json.loads(raw)
         descriptor = json.loads(result)
+        if descriptor.get("storageName"):
+            path = self.queue.cache_directory / descriptor["storageName"]
+            if (
+                path.resolve().parent != self.queue.cache_directory.resolve()
+                or not path.is_file()
+            ):
+                raise HTTPException(404, "Prepared media file is unavailable.")
+            stream = path.open("rb")
+            if os.fstat(stream.fileno()).st_size != descriptor["sizeBytes"]:
+                stream.close()
+                raise HTTPException(409, "Prepared media file changed.")
+            return stream, descriptor
         source = self.source(user_id, request["entityId"], request["sourceId"])
         if source["revision"] != request["sourceRevision"]:
             raise HTTPException(409, "Download source changed. Prepare it again.")

@@ -7818,8 +7818,12 @@
             "type": "string"
           },
           "profile": {
-            "const": "original",
             "default": "original",
+            "enum": [
+              "original",
+              "video-720p",
+              "video-1080p"
+            ],
             "title": "Profile",
             "type": "string"
           },

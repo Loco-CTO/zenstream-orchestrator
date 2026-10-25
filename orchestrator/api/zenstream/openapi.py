@@ -31,6 +31,16 @@ class FlexibleObject(DocsModel):
     """A deliberately open object used where providers add dynamic fields."""
 
 
+class OfflineCapabilities(DocsModel):
+    serverInstanceId: str = Field(examples=["instance-0001"])
+    serverTime: str = Field(examples=["2026-01-01T00:00:00Z"])
+    contractVersion: Literal["offline-v1"]
+    enabled: bool
+    features: list[str]
+    profiles: list[str]
+    maxBatchSize: int = Field(ge=1, le=100)
+
+
 class LumiModel(DocsModel):
     id: str
     label: str
@@ -1530,6 +1540,7 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    OfflineCapabilities,
     ErrorResponse,
     ValidationErrorItem,
     ValidationErrorResponse,
@@ -2684,6 +2695,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("GET", "/api/offline/capabilities"): OfflineCapabilities,
     ("GET", "/"): HealthResponse,
     ("GET", "/health/ready"): HealthResponse,
     ("POST", "/api/auth/login"): SessionResponse,

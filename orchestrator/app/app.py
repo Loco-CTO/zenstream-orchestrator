@@ -21,6 +21,7 @@ from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
 from api.zenstream.lumi_routes import router as lumi_router
 from api.zenstream.notification_routes import router as notification_router
+from api.zenstream.offline_routes import router as offline_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
 from app.artwork_variants import queue_selected, record_sweep_error
 from app.artwork_variants import stop_all as stop_artwork_variants
@@ -261,6 +262,7 @@ async def request_timing(request, call_next):
 
 
 app.include_router(client_router)
+app.include_router(offline_router)
 app.include_router(bazarr_router)
 app.include_router(calendar_router)
 app.include_router(notification_router)

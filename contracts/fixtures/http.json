@@ -9498,6 +9498,33 @@
       }
     },
     {
+      "operationId": "get_api_offline_capabilities",
+      "request": {
+        "method": "GET",
+        "parameters": {},
+        "path": "/api/offline/capabilities",
+        "pathTemplate": "/api/offline/capabilities"
+      },
+      "response": {
+        "body": {
+          "contractVersion": "offline-v1",
+          "enabled": true,
+          "features": [
+            "x"
+          ],
+          "maxBatchSize": 1,
+          "profiles": [
+            "x"
+          ],
+          "serverInstanceId": "fixture-id",
+          "serverTime": "2026-09-29T12:00:00Z"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineCapabilities",
+        "status": 200
+      }
+    },
+    {
       "operationId": "post_api_playback_items_by_entity_id_access",
       "request": {
         "body": {

@@ -7734,6 +7734,65 @@
         "title": "NotificationThumbnail",
         "type": "object"
       },
+      "OfflineCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "contractVersion": {
+            "const": "offline-v1",
+            "title": "Contractversion",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "maxBatchSize": {
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Maxbatchsize",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Profiles",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "examples": [
+              "instance-0001"
+            ],
+            "title": "Serverinstanceid",
+            "type": "string"
+          },
+          "serverTime": {
+            "examples": [
+              "2026-01-01T00:00:00Z"
+            ],
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "serverTime",
+          "contractVersion",
+          "enabled",
+          "features",
+          "profiles",
+          "maxBatchSize"
+        ],
+        "title": "OfflineCapabilities",
+        "type": "object"
+      },
       "PasswordChangeRequest": {
         "additionalProperties": true,
         "properties": {
@@ -28286,6 +28345,66 @@
         "summary": "Update a notification",
         "tags": [
           "Notifications"
+        ]
+      }
+    },
+    "/api/offline/capabilities": {
+      "get": {
+        "description": "Get /api/offline/capabilities. Results are filtered by the authenticated user's library grants. Additional catalog fields may be added without a breaking change. Method: `GET`; path: `/api/offline/capabilities`.",
+        "operationId": "get_api_offline_capabilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineCapabilities"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/capabilities",
+        "tags": [
+          "Catalog"
         ]
       }
     },

@@ -2,7 +2,7 @@
   <a href="./assets/icons/icon.png">
     <img src="./assets/icons/icon.png" alt="Logo" width="120" height="120">
   </a>
-  <h3 align="center">ZenStream Orchestrator</h3>
+  <h1 align="center">ZenStream Orchestrator</h1>
   <p align="center">
     A backend application server for <a href="https://github.com/Loco-CTO/zenstream-orchestrator">ZenStream</a>.
     <br />
@@ -42,7 +42,7 @@ Copy `.env.example` to `.env`. The main settings are:
 
 Do not commit `.env` files or credentials. See `.env.example` for the complete list of settings.
 
-## Development
+## Quick start
 
 Requires Python 3.14 and FFmpeg/FFprobe. Create and activate a virtual environment, install the dependencies, and run:
 
@@ -66,17 +66,17 @@ Docker mounts media read-only at `/media` and metadata at `/app/sqlite`. Add `/m
 
 ### Native
 
-Use the Development setup to run the Orchestrator directly on the host. Native libraries use their host filesystem paths.
+Use the Quick start setup to run the Orchestrator directly on the host. Native libraries use their host filesystem paths.
 
-## First run
+### First run
 
-1. Start the Orchestrator with Docker or the native Development setup.
+1. Start the Orchestrator with Docker or the native Quick start setup.
 2. Open the administrator dashboard at `/web/`.
 3. Save the root administrator credentials printed during the first startup; they are shown only once.
 4. Add a library. Use `/media` for Docker and the actual host path for a native run.
 5. Point the web and mobile clients at the same Orchestrator URL.
 
-## Windows launcher
+### Windows launcher
 
 The Windows x64 launcher starts the Orchestrator and administrator dashboard. Download the installer or portable executable from [GitHub Releases](https://github.com/Loco-CTO/zenstream-orchestrator/releases/latest).
 
@@ -90,7 +90,7 @@ To build the launcher from Windows with Node.js 24 and Python 3.14:
 
 The installer, portable executable, and `SHA256SUMS.txt` are written to `launcher/release/`.
 
-## Checks
+## Development checks
 
 Run the Python tests from the repository root:
 
@@ -105,6 +105,17 @@ Run the launcher tests from `launcher/`:
 npm ci
 npm test
 ```
+
+## Developer documentation
+
+- [Documentation index](docs/README.md)
+- [Architecture and ownership](docs/architecture.md)
+- [Administrator and launcher interface design](docs/ui-design.md)
+- [Catalog scanning](docs/catalog-scanning.md)
+- [Accounts and playback access](docs/auth-and-playback.md)
+- [Calendar and jobs](docs/calendar.md)
+- [Offline access](docs/offline.md)
+- [API contracts](contracts/README.md)
 
 ## Troubleshooting
 

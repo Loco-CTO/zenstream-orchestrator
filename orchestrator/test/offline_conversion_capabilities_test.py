@@ -11,7 +11,9 @@ class OfflineConversionCapabilitiesTest(unittest.TestCase):
             patch.object(offline_conversion, "_capabilities", {}),
             patch.object(offline_conversion, "_capability_time", None),
             patch.object(offline_conversion.time, "monotonic", return_value=1.0),
-            patch.object(offline_conversion, "ffmpeg_path", return_value=None) as ffmpeg,
+            patch.object(
+                offline_conversion, "ffmpeg_path", return_value=None
+            ) as ffmpeg,
         ):
             self.assertEqual(offline_conversion.conversion_capabilities(), expected)
 

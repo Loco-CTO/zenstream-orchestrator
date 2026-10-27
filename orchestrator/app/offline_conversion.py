@@ -12,13 +12,13 @@ from fastapi import HTTPException
 
 _capability_lock = threading.Lock()
 _capabilities = {}
-_capability_time = 0.0
+_capability_time = None
 
 
 def conversion_capabilities():
     global _capabilities, _capability_time
     with _capability_lock:
-        if time.monotonic() - _capability_time < 300:
+        if _capability_time is not None and time.monotonic() - _capability_time < 300:
             return dict(_capabilities)
         executable = ffmpeg_path()
         result = {"video": False, "audio": False, "toneMapping": False}

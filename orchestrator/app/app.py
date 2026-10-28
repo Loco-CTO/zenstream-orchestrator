@@ -21,6 +21,7 @@ from api.zenstream.documentation_routes import router as documentation_router
 from api.zenstream.library_routes import router as library_router
 from api.zenstream.lumi_routes import router as lumi_router
 from api.zenstream.notification_routes import router as notification_router
+from api.zenstream.offline_routes import router as offline_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
 from app.artwork_variants import queue_selected, record_sweep_error
 from app.artwork_variants import stop_all as stop_artwork_variants
@@ -45,6 +46,7 @@ from app.logging_config import get_logger
 from app.lumi_host import lumi_host
 from app.metadata_services import asset_executor
 from app.models.account import Account
+from app.offline_runtime import runtime as offline_runtime
 from app.playback import PlaybackManager
 from app.resource_retention import run_resource_retention
 from fastapi import FastAPI
@@ -86,6 +88,7 @@ async def lifespan(_app: FastAPI):
     await lumi_host.load_saved_integration()
     library_runtime.start()
     job_scheduler.start()
+    offline_runtime.start()
 
     async def maintain_sessions():
         while True:
@@ -195,6 +198,7 @@ async def lifespan(_app: FastAPI):
                 "could not flush session activity during shutdown", exc_info=True
             )
         PlaybackManager.stop_all()
+        await asyncio.to_thread(offline_runtime.stop)
         job_scheduler.stop()
         library_runtime.stop()
         stop_artwork_variants()
@@ -261,6 +265,7 @@ async def request_timing(request, call_next):
 
 
 app.include_router(client_router)
+app.include_router(offline_router)
 app.include_router(bazarr_router)
 app.include_router(calendar_router)
 app.include_router(notification_router)

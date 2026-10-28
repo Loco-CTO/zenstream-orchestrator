@@ -53,6 +53,16 @@ def _examples(value):
 
 
 class OpenApiContractTest(unittest.TestCase):
+    def test_offline_discovery_is_authenticated_and_typed(self):
+        operation = self.schema["paths"]["/api/offline/capabilities"]["get"]
+        self.assertTrue(operation["security"])
+        self.assertEqual(
+            operation["responses"]["200"]["content"]["application/json"]["schema"][
+                "$ref"
+            ],
+            "#/components/schemas/OfflineCapabilities",
+        )
+
     @classmethod
     def setUpClass(cls):
         app.openapi_schema = None

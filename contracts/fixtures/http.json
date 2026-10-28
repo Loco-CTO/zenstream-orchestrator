@@ -4915,6 +4915,56 @@
       }
     },
     {
+      "operationId": "post_api_account_sync",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "deviceId": "fixture-id",
+            "operations": [
+              {
+                "activityMs": 0,
+                "baseRevision": 0,
+                "clockTrusted": true,
+                "historyEpoch": 0,
+                "id": "00000000-0000-4000-8000-000000000001",
+                "kind": "checkpoint",
+                "payload": {},
+                "privacyEpoch": 0,
+                "sequence": 1,
+                "targetId": "fixture-id"
+              }
+            ],
+            "serverInstanceId": "fixture-id"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/account/sync",
+        "pathTemplate": "/api/account/sync"
+      },
+      "response": {
+        "body": {
+          "acknowledgements": [
+            {
+              "id": "fixture-id",
+              "outcome": "applied",
+              "revision": {},
+              "sequence": 1,
+              "state": {},
+              "targetId": "fixture-id"
+            }
+          ],
+          "historyEpoch": 1,
+          "privacyEpoch": 1,
+          "serverTime": "2026-09-29T12:00:00Z"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/AccountSyncResponse",
+        "status": 200
+      }
+    },
+    {
       "operationId": "delete_api_account_watch_history",
       "request": {
         "method": "DELETE",
@@ -9494,6 +9544,378 @@
         },
         "contentType": "application/json",
         "schemaRef": "#/components/schemas/NotificationReadResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "post_api_offline_assets",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "audioStreamId": 0,
+            "itemId": "fixture-id",
+            "profile": "original",
+            "retry": true,
+            "selectionId": "fixture-id",
+            "sourceId": "fixture-id",
+            "subtitleStreamIndices": [
+              1
+            ]
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/assets",
+        "pathTemplate": "/api/offline/assets"
+      },
+      "response": {
+        "body": {
+          "bundleUrl": "x",
+          "contentUrl": "x",
+          "durationSeconds": 1.25,
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemId": "fixture-id",
+          "mimeType": "x",
+          "profile": "x",
+          "replayGain": {
+            "fixtureKey": "x"
+          },
+          "sha256": "x",
+          "sizeBytes": 1,
+          "sourceId": "fixture-id",
+          "sourceRevision": "x",
+          "state": "x",
+          "trackManifest": [
+            {}
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineAssetResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id",
+        "pathTemplate": "/api/offline/assets/{asset_id}"
+      },
+      "response": {
+        "body": {
+          "bundleUrl": "x",
+          "contentUrl": "x",
+          "durationSeconds": 1.25,
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemId": "fixture-id",
+          "mimeType": "x",
+          "profile": "x",
+          "replayGain": {
+            "fixtureKey": "x"
+          },
+          "sha256": "x",
+          "sizeBytes": 1,
+          "sourceId": "fixture-id",
+          "sourceRevision": "x",
+          "state": "x",
+          "trackManifest": [
+            {}
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineAssetResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_bundle",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id"
+          },
+          "query": {
+            "language": "xx"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/bundle",
+        "pathTemplate": "/api/offline/assets/{asset_id}/bundle"
+      },
+      "response": {
+        "body": {
+          "artwork": [
+            {}
+          ],
+          "chapters": [
+            {}
+          ],
+          "episodeNeighbors": {
+            "fixtureKey": "x"
+          },
+          "itemId": "fixture-id",
+          "items": [
+            {}
+          ],
+          "language": "x",
+          "lyrics": {},
+          "presentationRevision": "x",
+          "segments": [
+            {}
+          ],
+          "stateRevisions": {},
+          "subtitles": [
+            {}
+          ],
+          "supplementRevision": "x",
+          "warnings": [
+            "x"
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineBundleResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_content",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "header": {
+            "If-Range": "x",
+            "Range": "x"
+          },
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/content",
+        "pathTemplate": "/api/offline/assets/{asset_id}/content"
+      },
+      "response": {
+        "body": "fixture-binary-payload",
+        "contentType": "application/octet-stream",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "head_api_offline_assets_by_asset_id_content",
+      "request": {
+        "method": "HEAD",
+        "parameters": {
+          "header": {
+            "If-Range": "x",
+            "Range": "x"
+          },
+          "path": {
+            "asset_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/content",
+        "pathTemplate": "/api/offline/assets/{asset_id}/content"
+      },
+      "response": {
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_assets_by_asset_id_supplements_by_index_vtt",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "asset_id": "fixture-id",
+            "index": 1
+          }
+        },
+        "path": "/api/offline/assets/fixture-id/supplements/1.vtt",
+        "pathTemplate": "/api/offline/assets/{asset_id}/supplements/{index}.vtt"
+      },
+      "response": {
+        "body": "fixture-binary-payload",
+        "contentType": "text/vtt",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_capabilities",
+      "request": {
+        "method": "GET",
+        "parameters": {},
+        "path": "/api/offline/capabilities",
+        "pathTemplate": "/api/offline/capabilities"
+      },
+      "response": {
+        "body": {
+          "contractVersion": "offline-v1",
+          "enabled": true,
+          "features": [
+            "x"
+          ],
+          "hdrToneMapping": true,
+          "maxBatchSize": 1,
+          "profiles": [
+            "x"
+          ],
+          "serverInstanceId": "fixture-id",
+          "serverTime": "2026-09-29T12:00:00Z"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineCapabilities",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "post_api_offline_reconcile",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "language": "xx",
+            "objects": [
+              {
+                "id": "fixture-id",
+                "kind": "catalog",
+                "libraryId": "fixture-id",
+                "offset": 0,
+                "presentationRevision": "x",
+                "sourceId": "fixture-id",
+                "sourceRevision": "x"
+              }
+            ],
+            "serverInstanceId": "fixture-id"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/reconcile",
+        "pathTemplate": "/api/offline/reconcile"
+      },
+      "response": {
+        "body": {
+          "historyEpoch": 1,
+          "libraryAccess": {
+            "fixtureKey": true
+          },
+          "objects": [
+            {}
+          ],
+          "privacyEpoch": 1,
+          "serverInstanceId": "fixture-id",
+          "serverTime": "2026-09-29T12:00:00Z",
+          "watchHistoryEnabled": true
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineReconcileResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "post_api_offline_selections",
+      "request": {
+        "body": {
+          "contentType": "application/json",
+          "value": {
+            "itemId": "fixture-id",
+            "kind": "catalog",
+            "language": "xx"
+          }
+        },
+        "method": "POST",
+        "parameters": {},
+        "path": "/api/offline/selections",
+        "pathTemplate": "/api/offline/selections"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "delete_api_offline_selections_by_selection_id",
+      "request": {
+        "method": "DELETE",
+        "parameters": {
+          "path": {
+            "selection_id": "fixture-id"
+          }
+        },
+        "path": "/api/offline/selections/fixture-id",
+        "pathTemplate": "/api/offline/selections/{selection_id}"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_selections_by_selection_id",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "selection_id": "fixture-id"
+          },
+          "query": {
+            "offset": 0
+          }
+        },
+        "path": "/api/offline/selections/fixture-id",
+        "pathTemplate": "/api/offline/selections/{selection_id}"
+      },
+      "response": {
+        "body": {
+          "errorCode": "x",
+          "id": "fixture-id",
+          "itemCount": 1,
+          "items": [
+            {}
+          ],
+          "metadata": [
+            {}
+          ],
+          "nextOffset": 1,
+          "state": "x"
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineSelectionResponse",
         "status": 200
       }
     },

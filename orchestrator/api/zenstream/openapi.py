@@ -13,6 +13,11 @@ import warnings
 from copy import deepcopy
 from typing import Any, Literal
 
+from app.offline_assets import OfflineAssetRequest, OfflineAssetResponse
+from app.offline_bundle import OfflineBundleResponse
+from app.offline_reconcile import OfflineReconcileRequest, OfflineReconcileResponse
+from app.offline_selections import OfflineSelectionRequest, OfflineSelectionResponse
+from app.offline_sync import AccountSyncRequest, AccountSyncResponse
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
@@ -29,6 +34,17 @@ class DocsModel(BaseModel):
 
 class FlexibleObject(DocsModel):
     """A deliberately open object used where providers add dynamic fields."""
+
+
+class OfflineCapabilities(DocsModel):
+    serverInstanceId: str = Field(examples=["instance-0001"])
+    serverTime: str = Field(examples=["2026-01-01T00:00:00Z"])
+    contractVersion: Literal["offline-v1"]
+    enabled: bool
+    features: list[str]
+    profiles: list[str]
+    hdrToneMapping: bool
+    maxBatchSize: int = Field(ge=1, le=100)
 
 
 class LumiModel(DocsModel):
@@ -1530,6 +1546,16 @@ class SyncplayParticipationRequest(DocsModel):
 
 
 DOC_MODELS: tuple[type[BaseModel], ...] = (
+    OfflineReconcileRequest,
+    OfflineReconcileResponse,
+    OfflineBundleResponse,
+    OfflineAssetRequest,
+    OfflineAssetResponse,
+    OfflineSelectionRequest,
+    OfflineSelectionResponse,
+    AccountSyncRequest,
+    AccountSyncResponse,
+    OfflineCapabilities,
     ErrorResponse,
     ValidationErrorItem,
     ValidationErrorResponse,
@@ -1709,6 +1735,10 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
 
 
 OPENAPI_TAGS = [
+    {
+        "name": "Offline & Downloads",
+        "description": "Account-scoped offline selections, prepared media, and metadata reconciliation.",
+    },
     {
         "name": "System & Client Bootstrap",
         "description": "Health, version, public configuration, language catalogs, and client registration.",
@@ -2384,6 +2414,8 @@ def _stable_operation_id(method: str, path: str) -> str:
 
 
 def _tag_for_path(path: str) -> str:
+    if path.startswith("/api/offline/"):
+        return "Offline & Downloads"
     if path.startswith("/api/lumi/"):
         return "Lumi"
     if path == "/" or path in {
@@ -2446,7 +2478,10 @@ def _tag_for_path(path: str) -> str:
 
 
 def _description_for(tag: str, method: str, path: str, summary: str) -> str:
+    if path == "/api/offline/assets/{asset_id}" and method == "GET":
+        return "Download preparation status and immutable output manifest, including video color metadata and HDR recovery restrictions."
     details = {
+        "Offline & Downloads": "Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions.",
         "System & Client Bootstrap": "Use this endpoint during client startup or registration.",
         "Authentication": "This endpoint participates in regular-user authentication or capability-ticket issuance.",
         "Account & Preferences": "The response is scoped to the authenticated account and preserves the existing preference payload.",
@@ -2543,6 +2578,10 @@ def _error_responses(statuses: tuple[int, ...]) -> dict[str, Any]:
 
 
 _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/reconcile"): OfflineReconcileRequest,
+    ("POST", "/api/offline/assets"): OfflineAssetRequest,
+    ("POST", "/api/offline/selections"): OfflineSelectionRequest,
+    ("POST", "/api/account/sync"): AccountSyncRequest,
     ("POST", "/api/auth/login"): CredentialsRequest,
     ("POST", "/api/auth/browser-login"): CredentialsRequest,
     ("POST", "/api/auth/refresh"): RefreshRequest,
@@ -2633,6 +2672,7 @@ _REQUEST_MODELS: dict[tuple[str, str], type[BaseModel]] = {
 
 _NO_REQUEST_BODY = frozenset(
     {
+        ("DELETE", "/api/offline/selections/{selection_id}"),
         ("POST", "/api/auth/logout"),
         ("POST", "/api/auth/socket-ticket"),
         ("DELETE", "/api/account/avatar"),
@@ -2684,6 +2724,15 @@ _NO_CONTENT_RESPONSES = frozenset(
 
 
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
+    ("POST", "/api/offline/reconcile"): OfflineReconcileResponse,
+    ("GET", "/api/offline/assets/{asset_id}/bundle"): OfflineBundleResponse,
+    ("POST", "/api/offline/assets"): OfflineAssetResponse,
+    ("GET", "/api/offline/assets/{asset_id}"): OfflineAssetResponse,
+    ("POST", "/api/offline/selections"): OfflineSelectionResponse,
+    ("GET", "/api/offline/selections/{selection_id}"): OfflineSelectionResponse,
+    ("DELETE", "/api/offline/selections/{selection_id}"): OfflineSelectionResponse,
+    ("POST", "/api/account/sync"): AccountSyncResponse,
+    ("GET", "/api/offline/capabilities"): OfflineCapabilities,
     ("GET", "/"): HealthResponse,
     ("GET", "/health/ready"): HealthResponse,
     ("POST", "/api/auth/login"): SessionResponse,
@@ -3363,6 +3412,21 @@ def _annotate_parameters(operation: dict[str, Any], path: str) -> None:
     """Annotate parameters, then add media capability parameters when needed."""
     for parameter in operation.get("parameters", []):
         _annotate_parameter(parameter, path)
+    if path == "/api/offline/assets/{asset_id}/content":
+        _ensure_parameter(
+            operation,
+            "Range",
+            "header",
+            description="A single byte range for resumable delivery.",
+            example="bytes=1024-",
+        )
+        _ensure_parameter(
+            operation,
+            "If-Range",
+            "header",
+            description="Strong ETag of the partial local representation; a mismatch returns the full file.",
+            example='"sha256-example"',
+        )
     if (
         path.startswith("/api/playback/")
         or path.startswith("/api/catalog/items/")
@@ -3424,6 +3488,26 @@ def _security_for(path: str, method: str) -> list[dict[str, list[Any]]] | list[A
 
 
 def _response_for(path: str, method: str) -> dict[str, Any]:
+    if path == "/api/offline/assets/{asset_id}/content":
+        headers = {
+            name: {"schema": {"type": "string"}}
+            for name in ("ETag", "Accept-Ranges", "Content-Length", "Content-Range")
+        }
+        response = (
+            _empty_response("Media headers.", headers)
+            if method == "HEAD"
+            else _binary_response(
+                ("application/octet-stream",),
+                "The prepared media representation.",
+                headers,
+            )
+        )
+        return {
+            "200": deepcopy(response),
+            "206": deepcopy(response),
+            "416": _empty_response("Invalid or unsatisfiable byte range.", headers),
+            "304": _empty_response("The representation is unchanged.", headers),
+        }
     if method == "HEAD" and path == "/api/playback/items/{entity_id}/stream":
         response = _binary_response(
             ("video/mp4", "audio/mpeg", "application/octet-stream"),

@@ -1,6 +1,68 @@
 {
   "components": {
     "schemas": {
+      "AccountSyncRequest": {
+        "properties": {
+          "deviceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Deviceid",
+            "type": "string"
+          },
+          "operations": {
+            "items": {
+              "$ref": "#/components/schemas/SyncOperation"
+            },
+            "maxItems": 100,
+            "title": "Operations",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Serverinstanceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "deviceId",
+          "operations"
+        ],
+        "title": "AccountSyncRequest",
+        "type": "object"
+      },
+      "AccountSyncResponse": {
+        "properties": {
+          "acknowledgements": {
+            "items": {
+              "$ref": "#/components/schemas/SyncAcknowledgement"
+            },
+            "title": "Acknowledgements",
+            "type": "array"
+          },
+          "historyEpoch": {
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "privacyEpoch": {
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverTime",
+          "historyEpoch",
+          "privacyEpoch",
+          "acknowledgements"
+        ],
+        "title": "AccountSyncResponse",
+        "type": "object"
+      },
       "AdminAccount": {
         "additionalProperties": true,
         "properties": {
@@ -7734,6 +7796,656 @@
         "title": "NotificationThumbnail",
         "type": "object"
       },
+      "OfflineAssetRequest": {
+        "properties": {
+          "audioStreamId": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Audiostreamid"
+          },
+          "itemId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Itemid",
+            "type": "string"
+          },
+          "profile": {
+            "default": "original",
+            "enum": [
+              "original",
+              "video-720p",
+              "video-1080p",
+              "audio-128k",
+              "audio-256k"
+            ],
+            "title": "Profile",
+            "type": "string"
+          },
+          "retry": {
+            "default": false,
+            "title": "Retry",
+            "type": "boolean"
+          },
+          "selectionId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Selectionid",
+            "type": "string"
+          },
+          "sourceId": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sourceid"
+          },
+          "subtitleStreamIndices": {
+            "items": {
+              "type": "integer"
+            },
+            "maxItems": 8,
+            "title": "Subtitlestreamindices",
+            "type": "array"
+          }
+        },
+        "required": [
+          "selectionId",
+          "itemId"
+        ],
+        "title": "OfflineAssetRequest",
+        "type": "object"
+      },
+      "OfflineAssetResponse": {
+        "properties": {
+          "bundleUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Bundleurl"
+          },
+          "contentUrl": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Contenturl"
+          },
+          "durationSeconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Durationseconds"
+          },
+          "errorCode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Errorcode"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "itemId": {
+            "title": "Itemid",
+            "type": "string"
+          },
+          "mimeType": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Mimetype"
+          },
+          "profile": {
+            "title": "Profile",
+            "type": "string"
+          },
+          "replayGain": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Replaygain",
+            "type": "object"
+          },
+          "sha256": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sha256"
+          },
+          "sizeBytes": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sizebytes"
+          },
+          "sourceId": {
+            "title": "Sourceid",
+            "type": "string"
+          },
+          "sourceRevision": {
+            "title": "Sourcerevision",
+            "type": "string"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "trackManifest": {
+            "description": "Output stream indexes and selected track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Trackmanifest",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "itemId",
+          "sourceId",
+          "sourceRevision",
+          "profile",
+          "state"
+        ],
+        "title": "OfflineAssetResponse",
+        "type": "object"
+      },
+      "OfflineBundleResponse": {
+        "properties": {
+          "artwork": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Artwork",
+            "type": "array"
+          },
+          "chapters": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Chapters",
+            "type": "array"
+          },
+          "episodeNeighbors": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Episodeneighbors"
+          },
+          "itemId": {
+            "title": "Itemid",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "lyrics": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Lyrics"
+          },
+          "presentationRevision": {
+            "title": "Presentationrevision",
+            "type": "string"
+          },
+          "segments": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Segments",
+            "type": "array"
+          },
+          "stateRevisions": {
+            "additionalProperties": true,
+            "title": "Staterevisions",
+            "type": "object"
+          },
+          "subtitles": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Subtitles",
+            "type": "array"
+          },
+          "supplementRevision": {
+            "title": "Supplementrevision",
+            "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "itemId",
+          "language",
+          "items",
+          "artwork",
+          "subtitles",
+          "presentationRevision",
+          "supplementRevision"
+        ],
+        "title": "OfflineBundleResponse",
+        "type": "object"
+      },
+      "OfflineCapabilities": {
+        "additionalProperties": true,
+        "properties": {
+          "contractVersion": {
+            "const": "offline-v1",
+            "title": "Contractversion",
+            "type": "string"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "hdrToneMapping": {
+            "title": "Hdrtonemapping",
+            "type": "boolean"
+          },
+          "maxBatchSize": {
+            "maximum": 100,
+            "minimum": 1,
+            "title": "Maxbatchsize",
+            "type": "integer"
+          },
+          "profiles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Profiles",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "examples": [
+              "instance-0001"
+            ],
+            "title": "Serverinstanceid",
+            "type": "string"
+          },
+          "serverTime": {
+            "examples": [
+              "2026-01-01T00:00:00Z"
+            ],
+            "title": "Servertime",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "serverTime",
+          "contractVersion",
+          "enabled",
+          "features",
+          "profiles",
+          "hdrToneMapping",
+          "maxBatchSize"
+        ],
+        "title": "OfflineCapabilities",
+        "type": "object"
+      },
+      "OfflineKnownObject": {
+        "properties": {
+          "id": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "default": "catalog",
+            "enum": [
+              "catalog",
+              "playlist"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "libraryId": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Libraryid"
+          },
+          "offset": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Offset",
+            "type": "integer"
+          },
+          "presentationRevision": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Presentationrevision"
+          },
+          "sourceId": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sourceid"
+          },
+          "sourceRevision": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Sourcerevision"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "OfflineKnownObject",
+        "type": "object"
+      },
+      "OfflineReconcileRequest": {
+        "properties": {
+          "language": {
+            "default": "en",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Language",
+            "type": "string"
+          },
+          "objects": {
+            "items": {
+              "$ref": "#/components/schemas/OfflineKnownObject"
+            },
+            "maxItems": 100,
+            "title": "Objects",
+            "type": "array"
+          },
+          "serverInstanceId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Serverinstanceid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "serverInstanceId"
+        ],
+        "title": "OfflineReconcileRequest",
+        "type": "object"
+      },
+      "OfflineReconcileResponse": {
+        "properties": {
+          "historyEpoch": {
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "libraryAccess": {
+            "additionalProperties": {
+              "type": "boolean"
+            },
+            "title": "Libraryaccess",
+            "type": "object"
+          },
+          "objects": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Objects",
+            "type": "array"
+          },
+          "privacyEpoch": {
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "serverInstanceId": {
+            "title": "Serverinstanceid",
+            "type": "string"
+          },
+          "serverTime": {
+            "title": "Servertime",
+            "type": "string"
+          },
+          "watchHistoryEnabled": {
+            "title": "Watchhistoryenabled",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "serverInstanceId",
+          "serverTime",
+          "historyEpoch",
+          "privacyEpoch",
+          "watchHistoryEnabled",
+          "libraryAccess",
+          "objects"
+        ],
+        "title": "OfflineReconcileResponse",
+        "type": "object"
+      },
+      "OfflineSelectionRequest": {
+        "properties": {
+          "itemId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Itemid",
+            "type": "string"
+          },
+          "kind": {
+            "default": "catalog",
+            "enum": [
+              "catalog",
+              "playlist"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "language": {
+            "default": "en",
+            "maxLength": 30,
+            "minLength": 2,
+            "title": "Language",
+            "type": "string"
+          }
+        },
+        "required": [
+          "itemId"
+        ],
+        "title": "OfflineSelectionRequest",
+        "type": "object"
+      },
+      "OfflineSelectionResponse": {
+        "properties": {
+          "errorCode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Errorcode"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "itemCount": {
+            "title": "Itemcount",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "metadata": {
+            "description": "Frozen parent metadata, including the selection root on the first page.",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Metadata",
+            "type": "array"
+          },
+          "nextOffset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Nextoffset"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state",
+          "itemCount"
+        ],
+        "title": "OfflineSelectionResponse",
+        "type": "object"
+      },
       "PasswordChangeRequest": {
         "additionalProperties": true,
         "properties": {
@@ -9932,6 +10644,152 @@
           }
         },
         "title": "SonarrCalendarConnectionUpdate",
+        "type": "object"
+      },
+      "SyncAcknowledgement": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "applied",
+              "superseded",
+              "duplicate",
+              "privacy_blocked",
+              "rejected"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Revision"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "State"
+          },
+          "targetId": {
+            "title": "Targetid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "outcome",
+          "targetId"
+        ],
+        "title": "SyncAcknowledgement",
+        "type": "object"
+      },
+      "SyncOperation": {
+        "properties": {
+          "activityMs": {
+            "minimum": 0,
+            "title": "Activityms",
+            "type": "integer"
+          },
+          "baseRevision": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Baserevision",
+            "type": "integer"
+          },
+          "clockTrusted": {
+            "default": true,
+            "title": "Clocktrusted",
+            "type": "boolean"
+          },
+          "historyEpoch": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Historyepoch",
+            "type": "integer"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "checkpoint",
+              "complete",
+              "watched",
+              "unwatched",
+              "music_play",
+              "favorite",
+              "unfavorite",
+              "follow",
+              "unfollow",
+              "playlist_create",
+              "playlist_name",
+              "playlist_description",
+              "playlist_delete",
+              "playlist_add",
+              "playlist_remove",
+              "playlist_order"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "privacyEpoch": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Privacyepoch",
+            "type": "integer"
+          },
+          "sequence": {
+            "maximum": 9223372036854775807,
+            "minimum": 1,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "targetId": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Targetid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "sequence",
+          "kind",
+          "targetId",
+          "activityMs"
+        ],
+        "title": "SyncOperation",
         "type": "object"
       },
       "SyncplayCommandRequest": {
@@ -12752,6 +13610,96 @@
           }
         ],
         "summary": "Reorder playlist items",
+        "tags": [
+          "Account & Preferences"
+        ]
+      }
+    },
+    "/api/account/sync": {
+      "post": {
+        "description": "Post /api/account/sync. The response is scoped to the authenticated account and preserves the existing preference payload. Method: `POST`; path: `/api/account/sync`.",
+        "operationId": "post_api_account_sync",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccountSyncRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountSyncResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/account/sync",
         "tags": [
           "Account & Preferences"
         ]
@@ -28289,6 +29237,1162 @@
         ]
       }
     },
+    "/api/offline/assets": {
+      "post": {
+        "description": "Post /api/offline/assets. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `POST`; path: `/api/offline/assets`.",
+        "operationId": "post_api_offline_assets",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineAssetRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineAssetResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/offline/assets",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/assets/{asset_id}": {
+      "get": {
+        "description": "Download preparation status and immutable output manifest, including video color metadata and HDR recovery restrictions.",
+        "operationId": "get_api_offline_assets_by_asset_id",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineAssetResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/assets/{asset_id}/bundle": {
+      "get": {
+        "description": "Get /api/offline/assets/{asset_id}/bundle. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/bundle`.",
+        "operationId": "get_api_offline_assets_by_asset_id_bundle",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Requested metadata locale; omitted uses the account/server fallback.",
+            "example": "en",
+            "in": "query",
+            "name": "language",
+            "required": false,
+            "schema": {
+              "default": "en",
+              "maxLength": 30,
+              "minLength": 2,
+              "title": "Language",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineBundleResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}/bundle",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/assets/{asset_id}/content": {
+      "get": {
+        "description": "Get /api/offline/assets/{asset_id}/content. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/content`.",
+        "operationId": "get_api_offline_assets_by_asset_id_content",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A single byte range for resumable delivery.",
+            "example": "bytes=1024-",
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Strong ETag of the partial local representation; a mismatch returns the full file.",
+            "example": "\"sha256-example\"",
+            "in": "header",
+            "name": "If-Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The prepared media representation.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "The prepared media representation.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The representation is unchanged.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "416": {
+            "description": "Invalid or unsatisfiable byte range.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}/content",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      },
+      "head": {
+        "description": "Head /api/offline/assets/{asset_id}/content. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `HEAD`; path: `/api/offline/assets/{asset_id}/content`.",
+        "operationId": "head_api_offline_assets_by_asset_id_content",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "A single byte range for resumable delivery.",
+            "example": "bytes=1024-",
+            "in": "header",
+            "name": "Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "Strong ETag of the partial local representation; a mismatch returns the full file.",
+            "example": "\"sha256-example\"",
+            "in": "header",
+            "name": "If-Range",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Media headers.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Media headers.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The representation is unchanged.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "416": {
+            "description": "Invalid or unsatisfiable byte range.",
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Length": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Head /api/offline/assets/{asset_id}/content",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/assets/{asset_id}/supplements/{index}.vtt": {
+      "get": {
+        "description": "Get /api/offline/assets/{asset_id}/supplements/{index}.vtt. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/assets/{asset_id}/supplements/{index}.vtt`.",
+        "operationId": "get_api_offline_assets_by_asset_id_supplements_by_index_vtt",
+        "parameters": [
+          {
+            "description": "asset_id value supplied in the path component.",
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "title": "Asset Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "index value supplied in the path component.",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/vtt": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              }
+            },
+            "description": "WebVTT subtitle content."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "query",
+                        "page"
+                      ],
+                      "msg": "Input should be greater than or equal to 1",
+                      "type": "greater_than_equal"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Request validation failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The required service or media tool is unavailable."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/assets/{asset_id}/supplements/{index}.vtt",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/capabilities": {
+      "get": {
+        "description": "Get /api/offline/capabilities. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/capabilities`.",
+        "operationId": "get_api_offline_capabilities",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineCapabilities"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/capabilities",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/reconcile": {
+      "post": {
+        "description": "Post /api/offline/reconcile. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `POST`; path: `/api/offline/reconcile`.",
+        "operationId": "post_api_offline_reconcile",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineReconcileRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineReconcileResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/offline/reconcile",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/selections": {
+      "post": {
+        "description": "Post /api/offline/selections. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `POST`; path: `/api/offline/selections`.",
+        "operationId": "post_api_offline_selections",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OfflineSelectionRequest"
+              }
+            }
+          },
+          "required": false
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Post /api/offline/selections",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
+    "/api/offline/selections/{selection_id}": {
+      "delete": {
+        "description": "Delete /api/offline/selections/{selection_id}. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `DELETE`; path: `/api/offline/selections/{selection_id}`.",
+        "operationId": "delete_api_offline_selections_by_selection_id",
+        "parameters": [
+          {
+            "description": "selection_id value supplied in the path component.",
+            "in": "path",
+            "name": "selection_id",
+            "required": true,
+            "schema": {
+              "title": "Selection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The authenticated principal is not allowed to perform this operation."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The resource is in conflict or the supplied revision is stale."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Delete /api/offline/selections/{selection_id}",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      },
+      "get": {
+        "description": "Get /api/offline/selections/{selection_id}. Downloads are account-scoped, grant-filtered, versioned representations; completed device copies are independent of online sessions. Method: `GET`; path: `/api/offline/selections/{selection_id}`.",
+        "operationId": "get_api_offline_selections_by_selection_id",
+        "parameters": [
+          {
+            "description": "selection_id value supplied in the path component.",
+            "in": "path",
+            "name": "selection_id",
+            "required": true,
+            "schema": {
+              "title": "Selection Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "offset value supplied in the query component.",
+            "example": 0,
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OfflineSelectionResponse"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The request is malformed or contains an unsupported value."
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The requested resource is not available to this principal."
+          }
+        },
+        "security": [
+          {
+            "UserBearerAuth": []
+          },
+          {
+            "UserSessionCookie": []
+          }
+        ],
+        "summary": "Get /api/offline/selections/{selection_id}",
+        "tags": [
+          "Offline & Downloads"
+        ]
+      }
+    },
     "/api/playback/items/{entity_id}/access": {
       "post": {
         "description": "Refresh playback access. Playback state and media access remain bound to the authenticated account and selected playback source. Method: `POST`; path: `/api/playback/items/{entity_id}/access`.",
@@ -32148,6 +34252,10 @@
     }
   },
   "tags": [
+    {
+      "description": "Account-scoped offline selections, prepared media, and metadata reconciliation.",
+      "name": "Offline & Downloads"
+    },
     {
       "description": "Health, version, public configuration, language catalogs, and client registration.",
       "name": "System & Client Bootstrap"

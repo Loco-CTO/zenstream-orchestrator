@@ -99,9 +99,7 @@ def audio_indices(source, request):
         if stream.get("codec_type") == "audio"
     ]
     if request.get("includeAllTracks"):
-        tracks.sort(
-            key=lambda stream: not stream.get("disposition", {}).get("default")
-        )
+        tracks.sort(key=lambda stream: not stream.get("disposition", {}).get("default"))
         return [stream["index"] for stream in tracks]
     selected = audio_index(source, request.get("audioStreamId"))
     return [] if selected is None else [selected]
@@ -139,9 +137,7 @@ def audio_metadata_args(source, selected, output_index=0):
     tags = audio_track_tags(source, selected)
     result = []
     if "language" in tags:
-        result.extend(
-            [f"-metadata:s:a:{output_index}", f"language={tags['language']}"]
-        )
+        result.extend([f"-metadata:s:a:{output_index}", f"language={tags['language']}"])
     if "title" in tags:
         result.extend(
             [f"-metadata:s:a:{output_index}", f"handler_name={tags['title']}"]

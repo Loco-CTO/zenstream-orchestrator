@@ -84,7 +84,9 @@ def selected_subtitles(assets, user, body, *, include_all=False):
         if stream.get("codec_type") == "subtitle"
     }
     result = []
-    indices = sorted(streams) if include_all else sorted(set(body.subtitleStreamIndices))
+    indices = (
+        sorted(streams) if include_all else sorted(set(body.subtitleStreamIndices))
+    )
     for index in indices:
         stream = streams.get(index)
         if not stream:

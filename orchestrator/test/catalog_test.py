@@ -1,11 +1,17 @@
 import hashlib
 import json
+import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app.catalog import Catalog, _CatalogReadContext, _sanitize_projected_lastfm
+from app.catalog import (
+    Catalog,
+    _CatalogDatabase,
+    _CatalogReadContext,
+    _sanitize_projected_lastfm,
+)
 from app.database import DatabaseHandler
 from app.models.account import Account
 from app.models.metadata import IMAGE_LANGUAGE_SCHEMA
@@ -37,6 +43,28 @@ class CatalogTest(unittest.TestCase):
 
     def tearDown(self):
         self.db.close()
+
+    def test_catalog_database_routes_mutations_through_writer(self):
+        with tempfile.TemporaryDirectory(
+            dir=Path(__file__).resolve().parents[2]
+        ) as directory:
+            database = DatabaseHandler(
+                "sqlite", {}, str(Path(directory) / "orchestrator.db")
+            )
+            try:
+                database.execute("CREATE TABLE values_table(value TEXT)")
+                database.execute("INSERT INTO values_table VALUES('enumerating')")
+                catalog_database = _CatalogDatabase(database)
+
+                catalog_database.execute(
+                    "UPDATE values_table SET value='ready' WHERE value='enumerating'"
+                )
+                self.assertEqual(
+                    catalog_database.execute("SELECT value FROM values_table"),
+                    [("ready",)],
+                )
+            finally:
+                database.close()
 
     def account(self):
         value = Account.__new__(Account)

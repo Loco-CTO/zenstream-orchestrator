@@ -113,6 +113,9 @@ class _CatalogDatabase:
         context = Catalog._read_context.get() if "Catalog" in globals() else None
         if context is not None:
             context.query_count += 1
+        statement = str(query or "").lstrip().upper()
+        if statement.startswith(("INSERT", "UPDATE", "DELETE", "REPLACE")):
+            return self._database.execute(query, params)
         return self._database.read_execute(query, params)
 
     def transaction(self):

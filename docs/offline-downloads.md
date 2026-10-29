@@ -6,9 +6,12 @@ operations to its durable server-instance UUID, rather than the server URL.
 Restoring the database preserves this UUID; creating a new database replaces it.
 
 Selections enumerate in bounded background batches and freeze their membership
-before transfer. Clients page at most 100 leaves and explicitly request assets
-for their selected exact source, audio track, subtitles and quality. A subsequent
-catalog or playlist change never adds downloads automatically.
+before transfer. Clients page at most 100 leaves and request assets for the
+selected exact source and main media quality. The `includeAllTracks` option
+includes every audio track and every available subtitle track for that source;
+portable conversions preserve all audio tracks and supported text subtitles.
+Image subtitles require the original asset. A subsequent catalog or playlist
+change never adds downloads automatically.
 
 Originals are hashed in background and delivered without a second permanent
 copy. Prepared MP4/H.264/AAC video and M4A/AAC audio require working FFmpeg and

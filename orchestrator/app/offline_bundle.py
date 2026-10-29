@@ -71,8 +71,8 @@ def episode_neighbors(catalog, user, identity):
     return result
 
 
-def selected_subtitles(assets, user, body):
-    if not body.subtitleStreamIndices:
+def selected_subtitles(assets, user, body, *, include_all=False):
+    if not include_all and not body.subtitleStreamIndices:
         return []
     sources = assets.media.sources(user, body.itemId)
     source = next((item for item in sources if item["id"] == body.sourceId), None)
@@ -84,7 +84,8 @@ def selected_subtitles(assets, user, body):
         if stream.get("codec_type") == "subtitle"
     }
     result = []
-    for index in sorted(set(body.subtitleStreamIndices)):
+    indices = sorted(streams) if include_all else sorted(set(body.subtitleStreamIndices))
+    for index in indices:
         stream = streams.get(index)
         if not stream:
             raise HTTPException(400, "Selected subtitle is unavailable.")

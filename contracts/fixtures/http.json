@@ -9554,6 +9554,7 @@
           "contentType": "application/json",
           "value": {
             "audioStreamId": 0,
+            "includeAllTracks": true,
             "itemId": "fixture-id",
             "profile": "original",
             "retry": true,

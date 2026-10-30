@@ -26,6 +26,12 @@ class OfflineAssetRequest(BaseModel):
     ] = "original"
     audioStreamId: int | None = Field(default=None, ge=0)
     subtitleStreamIndices: list[int] = Field(default_factory=list, max_length=8)
+    includeAllTracks: bool = Field(
+        default=False,
+        description=(
+            "Include all audio and subtitle tracks instead of per-track choices."
+        ),
+    )
     retry: bool = False
 
 
@@ -44,7 +50,11 @@ class OfflineAssetResponse(BaseModel):
     durationSeconds: float | None = None
     trackManifest: list[dict] = Field(
         default_factory=list,
-        description="Output stream indexes and selected track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
+        description=(
+            "Output stream indexes and included track metadata. Video entries include "
+            "colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR "
+            "restrictions."
+        ),
     )
     replayGain: dict[str, str] = Field(default_factory=dict)
     errorCode: str | None = None
@@ -114,11 +124,16 @@ class OfflineAssets:
             "profile": body.profile,
             "profileVersion": 1 if body.profile == "original" else 2,
         }
-        if body.profile != "original":
+        if body.includeAllTracks:
+            normalized["includeAllTracks"] = True
+        if body.profile != "original" and not body.includeAllTracks:
             normalized["audioStreamId"] = audio_index(source, body.audioStreamId)
-        if body.subtitleStreamIndices:
+        if body.includeAllTracks or body.subtitleStreamIndices:
             normalized["subtitles"] = selected_subtitles(
-                self, user_id, body.model_copy(update={"sourceId": source["id"]})
+                self,
+                user_id,
+                body.model_copy(update={"sourceId": source["id"]}),
+                include_all=body.includeAllTracks,
             )
         identity = self.queue.enqueue(
             user_id, body.selectionId, normalized, retry=body.retry

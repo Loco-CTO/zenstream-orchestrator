@@ -7811,6 +7811,12 @@
             "default": null,
             "title": "Audiostreamid"
           },
+          "includeAllTracks": {
+            "default": false,
+            "description": "Include all audio and subtitle tracks instead of per-track choices.",
+            "title": "Includealltracks",
+            "type": "boolean"
+          },
           "itemId": {
             "maxLength": 200,
             "minLength": 1,
@@ -7987,7 +7993,7 @@
             "type": "string"
           },
           "trackManifest": {
-            "description": "Output stream indexes and selected track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
+            "description": "Output stream indexes and included track metadata. Video entries include colorTransfer, colorPrimaries and isHdr so local recovery preserves HDR restrictions.",
             "items": {
               "additionalProperties": true,
               "type": "object"

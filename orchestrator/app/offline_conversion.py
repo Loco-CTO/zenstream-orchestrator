@@ -92,6 +92,19 @@ def audio_index(source, requested):
     )
 
 
+def audio_indices(source, request):
+    tracks = [
+        stream
+        for stream in source["probe"].get("streams", [])
+        if stream.get("codec_type") == "audio"
+    ]
+    if request.get("includeAllTracks"):
+        tracks.sort(key=lambda stream: not stream.get("disposition", {}).get("default"))
+        return [stream["index"] for stream in tracks]
+    selected = audio_index(source, request.get("audioStreamId"))
+    return [] if selected is None else [selected]
+
+
 def audio_track_tags(source, selected):
     stream = next(
         (
@@ -120,13 +133,15 @@ def audio_track_tags(source, selected):
     }
 
 
-def audio_metadata_args(source, selected):
+def audio_metadata_args(source, selected, output_index=0):
     tags = audio_track_tags(source, selected)
     result = []
     if "language" in tags:
-        result.extend(["-metadata:s:a:0", f"language={tags['language']}"])
+        result.extend([f"-metadata:s:a:{output_index}", f"language={tags['language']}"])
     if "title" in tags:
-        result.extend(["-metadata:s:a:0", f"handler_name={tags['title']}"])
+        result.extend(
+            [f"-metadata:s:a:{output_index}", f"handler_name={tags['title']}"]
+        )
     return result
 
 
@@ -163,7 +178,7 @@ def video_command(source, request, target):
     ]
     if not videos:
         raise HTTPException(409, "Video stream is unavailable.")
-    selected = audio_index(source, request.get("audioStreamId"))
+    selected = audio_indices(source, request)
     command = [
         ffmpeg_path(),
         "-nostdin",
@@ -176,8 +191,8 @@ def video_command(source, request, target):
         "-map",
         f"0:{videos[0]['index']}",
     ]
-    if selected is not None:
-        command.extend(["-map", f"0:{selected}"])
+    for index in selected:
+        command.extend(["-map", f"0:{index}"])
     command.extend(
         [
             "-map_metadata",
@@ -214,21 +229,21 @@ def video_command(source, request, target):
             str(target),
         ]
     )
-    if selected is not None:
-        command[-1:-1] = audio_metadata_args(source, selected)
+    for output_index, index in enumerate(selected):
+        command[-1:-1] = audio_metadata_args(source, index, output_index)
     return command
 
 
 def audio_command(source, request, target):
     if not conversion_capabilities()["audio"]:
         raise HTTPException(409, "Compact audio conversion is unavailable.")
-    selected = audio_index(source, request.get("audioStreamId"))
-    if selected is None:
+    selected = audio_indices(source, request)
+    if not selected:
         raise HTTPException(409, "Audio stream is unavailable.")
     track = next(
         stream
         for stream in source["probe"]["streams"]
-        if stream.get("index") == selected
+        if stream.get("index") == selected[0]
     )
     rate = int(track.get("sample_rate") or 48000)
     if rate not in {8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000}:
@@ -243,25 +258,29 @@ def audio_command(source, request, target):
         "-y",
         "-i",
         str(source["path"]),
-        "-map",
-        f"0:{selected}",
-        "-map_metadata",
-        "-1",
-        "-map_chapters",
-        "-1",
-        "-vn",
-        "-sn",
-        "-c:a",
-        "aac",
-        "-b:a",
-        bitrate,
-        "-ac",
-        "2",
-        "-ar",
-        str(rate),
-        "-threads",
-        "2",
     ]
+    for index in selected:
+        command.extend(["-map", f"0:{index}"])
+    command.extend(
+        [
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-vn",
+            "-sn",
+            "-c:a",
+            "aac",
+            "-b:a",
+            bitrate,
+            "-ac",
+            "2",
+            "-ar",
+            str(rate),
+            "-threads",
+            "2",
+        ]
+    )
     if int(track.get("channels") or 2) <= 2:
         tags = source["probe"].get("format", {}).get("tags", {})
         for key, value in tags.items():
@@ -276,7 +295,8 @@ def audio_command(source, request, target):
                 and len(str(value)) <= 64
             ):
                 command.extend(["-metadata", f"{key.lower()}={value}"])
-    command.extend(audio_metadata_args(source, selected))
+    for output_index, index in enumerate(selected):
+        command.extend(audio_metadata_args(source, index, output_index))
     command.extend(["-movflags", "+faststart", "-f", "mp4", str(target)])
     return command
 
@@ -292,11 +312,13 @@ def prepare_audio(assets, identity, source, request, should_stop):
         suffix=".m4a",
         mime_type="audio/mp4",
     )
-    selected = audio_index(source, request.get("audioStreamId"))
+    selected = audio_indices(source, request)
+    if not selected:
+        return result
     track = next(
         stream
         for stream in source["probe"]["streams"]
-        if stream.get("index") == selected
+        if stream.get("index") == selected[0]
     )
     if int(track.get("channels") or 2) <= 2:
         result["replayGain"] = {
@@ -379,15 +401,29 @@ def prepare_video(
             os.fsync(stream.fileno())
         temporary.replace(final)
         tracks = assets.tracks({"probe": probe})
-        selected = audio_index(source, request.get("audioStreamId"))
-        selected_tags = audio_track_tags(source, selected)
+        selected = audio_indices(source, request)
+        output_index = 0
         for track in tracks:
-            if track["type"] == "audio":
-                track["sourceIndex"] = selected
-                if "language" in selected_tags:
-                    track["language"] = selected_tags["language"]
-                if "title" in selected_tags:
-                    track["displayTitle"] = selected_tags["title"]
+            if track["type"] != "audio":
+                continue
+            if output_index >= len(selected):
+                break
+            source_index = selected[output_index]
+            source_track = next(
+                stream
+                for stream in source["probe"]["streams"]
+                if stream.get("index") == source_index
+            )
+            selected_tags = audio_track_tags(source, source_index)
+            track["sourceIndex"] = source_index
+            track["isDefault"] = bool(
+                source_track.get("disposition", {}).get("default")
+            )
+            if "language" in selected_tags:
+                track["language"] = selected_tags["language"]
+            if "title" in selected_tags:
+                track["displayTitle"] = selected_tags["title"]
+            output_index += 1
         return {
             "storageName": final.name,
             "sizeBytes": size,

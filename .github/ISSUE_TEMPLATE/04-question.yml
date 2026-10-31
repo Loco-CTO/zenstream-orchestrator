@@ -1,0 +1,32 @@
+name: Question
+description: Ask about setup, usage, or implementation.
+labels:
+  - question
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value:
+        Report an issue with the ZenStream API, services, dashboard, and Windows launcher. Search existing
+        issues first. If you are unsure which component owns a problem, submit your best guess and include
+        the affected client and server versions. Remove tokens, passwords, private media paths, and personal
+        conversation content from logs and attachments.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description:
+        Orchestrator and affected client versions; installation/deployment method; OS; job or
+        API involved; redacted server logs; media container/codecs when relevant.
+  - type: textarea
+    id: attempts
+    attributes:
+      label: Documentation and steps already tried
+    validations:
+      required: true

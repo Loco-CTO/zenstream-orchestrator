@@ -22,3 +22,8 @@ Use this index to find the service or interface guide for a change. Current impl
 - [Curated API contracts and fixtures](../contracts/README.md)
 - [Metadata and local-data notes](../METADATA.md)
 - [Breaking-change exceptions](../contracts/breaking-change-exceptions.md)
+
+## Contributing and triage
+
+- [Contributing](../CONTRIBUTING.md)
+- [Issue and pull request triage](triage.md)

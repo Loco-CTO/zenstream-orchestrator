@@ -38,3 +38,9 @@ This repository owns the FastAPI Orchestrator, SQLite persistence, catalog scann
 - Use sentence-case headings, short paragraphs, descriptive links, and repository-relative paths.
 - Architecture documents explain ownership and flow. Keep scanner, account/playback, calendar, and offline details in their focused guides rather than in this file.
 - Update `docs/ui-design.md` when shared visual or navigation patterns change; keep feature-specific behavior in its focused guide.
+
+## Contribution guidance
+
+- Follow `CONTRIBUTING.md` for issue reports, PR descriptions, validation evidence, and cross-repository coordination.
+- Issue forms and the PR template live in `.github/`; label meanings and the dry-run metadata sync command are documented in `docs/triage.md`.
+- Keep shared label semantics consistent across the four repositories and tailor area labels and environment prompts to this repository's ownership.

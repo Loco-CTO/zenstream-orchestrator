@@ -1,0 +1,41 @@
+name: Feature request
+description: Describe a problem and the outcome you want.
+labels:
+  - enhancement
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value:
+        Report an issue with the ZenStream API, services, dashboard, and Windows launcher. Search existing
+        issues first. If you are unsure which component owns a problem, submit your best guess and include
+        the affected client and server versions. Remove tokens, passwords, private media paths, and personal
+        conversation content from logs and attachments.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and workarounds
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How would someone verify that this solves the problem?
+    validations:
+      required: true
+  - type: textarea
+    id: related
+    attributes:
+      label: Related components or issues
+      description: Link relevant work in other ZenStream repositories if known.

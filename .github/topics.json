@@ -1,0 +1,11 @@
+{
+  "repository": "Loco-CTO/zenstream-orchestrator",
+  "topics": [
+    "zenstream",
+    "media-server",
+    "self-hosted",
+    "python",
+    "fastapi",
+    "sqlite"
+  ]
+}

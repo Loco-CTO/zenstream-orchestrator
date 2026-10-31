@@ -1,0 +1,172 @@
+[
+  {
+    "name": "bug",
+    "color": "d73a4a",
+    "description": "Something is not working"
+  },
+  {
+    "name": "enhancement",
+    "color": "a2eeef",
+    "description": "New capability or improvement"
+  },
+  {
+    "name": "documentation",
+    "color": "0075ca",
+    "description": "Documentation correction or improvement"
+  },
+  {
+    "name": "question",
+    "color": "d876e3",
+    "description": "Usage or implementation question"
+  },
+  {
+    "name": "dependencies",
+    "color": "0366d6",
+    "description": "Dependency updates"
+  },
+  {
+    "name": "status: needs-triage",
+    "color": "ededed",
+    "description": "Awaiting initial maintainer assessment"
+  },
+  {
+    "name": "status: needs-info",
+    "color": "fff4b3",
+    "description": "Waiting for reproduction details or other information"
+  },
+  {
+    "name": "status: confirmed",
+    "color": "c2e0c6",
+    "description": "Maintainer has confirmed the problem or accepted the request"
+  },
+  {
+    "name": "status: blocked",
+    "color": "b60205",
+    "description": "Cannot proceed; blocker is linked in the issue"
+  },
+  {
+    "name": "priority: critical",
+    "color": "b60205",
+    "description": "Immediate attention: widespread outage, data loss, or comparable impact"
+  },
+  {
+    "name": "priority: high",
+    "color": "d93f0b",
+    "description": "Major impact with limited or no workaround"
+  },
+  {
+    "name": "priority: normal",
+    "color": "fbca04",
+    "description": "Normal planned work"
+  },
+  {
+    "name": "priority: low",
+    "color": "c5def5",
+    "description": "Minor impact or optional improvement"
+  },
+  {
+    "name": "regression",
+    "color": "e99695",
+    "description": "Previously working behavior has broken"
+  },
+  {
+    "name": "performance",
+    "color": "f9d0c4",
+    "description": "Latency, throughput, resource use, or responsiveness"
+  },
+  {
+    "name": "breaking-change",
+    "color": "b60205",
+    "description": "Requires consumer changes or migration"
+  },
+  {
+    "name": "cross-repo",
+    "color": "5319e7",
+    "description": "Coordinated work in multiple ZenStream repositories"
+  },
+  {
+    "name": "good first issue",
+    "color": "7057ff",
+    "description": "Scoped newcomer-friendly work with guidance available"
+  },
+  {
+    "name": "help wanted",
+    "color": "008672",
+    "description": "Contributions are welcome; scope and next steps are documented"
+  },
+  {
+    "name": "duplicate",
+    "color": "cfd3d7",
+    "description": "Already tracked elsewhere; link the original"
+  },
+  {
+    "name": "invalid",
+    "color": "e4e669",
+    "description": "Does not describe an actionable issue for this repository"
+  },
+  {
+    "name": "wontfix",
+    "color": "ffffff",
+    "description": "Maintainer has decided not to pursue this change"
+  },
+  {
+    "name": "accessibility",
+    "color": "f143ab",
+    "description": "Barrier affecting people with disabilities"
+  },
+  {
+    "name": "area: api",
+    "color": "c5def5",
+    "description": "Changes or reports involving api"
+  },
+  {
+    "name": "area: catalog",
+    "color": "c5def5",
+    "description": "Changes or reports involving catalog"
+  },
+  {
+    "name": "area: metadata",
+    "color": "c5def5",
+    "description": "Changes or reports involving metadata"
+  },
+  {
+    "name": "area: playback",
+    "color": "c5def5",
+    "description": "Changes or reports involving playback"
+  },
+  {
+    "name": "area: offline",
+    "color": "c5def5",
+    "description": "Changes or reports involving offline"
+  },
+  {
+    "name": "area: jobs",
+    "color": "c5def5",
+    "description": "Changes or reports involving jobs"
+  },
+  {
+    "name": "area: database",
+    "color": "c5def5",
+    "description": "Changes or reports involving database"
+  },
+  {
+    "name": "area: auth",
+    "color": "c5def5",
+    "description": "Changes or reports involving auth"
+  },
+  {
+    "name": "area: dashboard",
+    "color": "c5def5",
+    "description": "Changes or reports involving dashboard"
+  },
+  {
+    "name": "area: launcher",
+    "color": "c5def5",
+    "description": "Changes or reports involving launcher"
+  },
+  {
+    "name": "area: deployment",
+    "color": "c5def5",
+    "description": "Changes or reports involving deployment"
+  }
+]

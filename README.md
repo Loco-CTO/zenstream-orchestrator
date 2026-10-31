@@ -108,6 +108,9 @@ npm test
 
 ## Developer documentation
 
+- [Contributing](CONTRIBUTING.md)
+- [Issue and pull request triage](docs/triage.md)
+
 - [Documentation index](docs/README.md)
 - [Architecture and ownership](docs/architecture.md)
 - [Administrator and launcher interface design](docs/ui-design.md)

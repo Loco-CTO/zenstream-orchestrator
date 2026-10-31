@@ -1,0 +1,47 @@
+name: Bug report
+description: Report broken behavior with steps and environment details.
+labels:
+  - bug
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value:
+        Report an issue with the ZenStream API, services, dashboard, and Windows launcher. Search existing
+        issues first. If you are unsure which component owns a problem, submit your best guess and include
+        the affected client and server versions. Remove tokens, passwords, private media paths, and personal
+        conversation content from logs and attachments.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Versions and environment
+      description:
+        Orchestrator and affected client versions; installation/deployment method; OS; job or
+        API involved; redacted server logs; media container/codecs when relevant. Use unknown for details
+        you cannot identify.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Include a minimal example, frequency, and whether this worked in an earlier version.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Logs and screenshots
+      description: "Optional: include relevant text logs and screenshots after removing private information."

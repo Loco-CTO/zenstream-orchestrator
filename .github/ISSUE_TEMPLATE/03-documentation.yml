@@ -1,0 +1,30 @@
+name: Documentation issue
+description: Report missing, incorrect, or unclear documentation.
+labels:
+  - documentation
+  - "status: needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value:
+        Report an issue with the ZenStream API, services, dashboard, and Windows launcher. Search existing
+        issues first. If you are unsure which component owns a problem, submit your best guess and include
+        the affected client and server versions. Remove tokens, passwords, private media paths, and personal
+        conversation content from logs and attachments.
+  - type: input
+    id: page
+    attributes:
+      label: Documentation page or file
+      description: Paste a link or repository-relative path.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is unclear or incorrect?
+    validations:
+      required: true
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement

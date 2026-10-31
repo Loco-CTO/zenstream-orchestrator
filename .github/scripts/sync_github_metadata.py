@@ -8,12 +8,16 @@ from pathlib import Path
 
 
 def gh(*args):
-    return subprocess.run(["gh", *args], check=True, capture_output=True, text=True).stdout
+    return subprocess.run(
+        ["gh", *args], check=True, capture_output=True, text=True
+    ).stdout
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--apply", action="store_true", help="Apply the printed changes")
+    parser.add_argument(
+        "--apply", action="store_true", help="Apply the printed changes"
+    )
     args = parser.parse_args()
     config_dir = Path(__file__).resolve().parent.parent
     # JSON is a YAML subset: this representation needs no third-party YAML parser.
@@ -39,8 +43,18 @@ def main():
         raise ValueError("Invalid topic name")
     current = {
         item["name"].casefold(): item
-        for item in json.loads(gh("label", "list", "--repo", repo, "--limit", "1000",
-                                  "--json", "name,color,description"))
+        for item in json.loads(
+            gh(
+                "label",
+                "list",
+                "--repo",
+                repo,
+                "--limit",
+                "1000",
+                "--json",
+                "name,color,description",
+            )
+        )
     }
     info = json.loads(gh("repo", "view", repo, "--json", "repositoryTopics"))
     existing_topics = {item["name"] for item in info["repositoryTopics"] or []}
@@ -59,17 +73,29 @@ def main():
         changes += 1
         print(f"{'Update' if existing else 'Create'} label: {repo} {label['name']}")
         if args.apply:
-            gh("label", "create", label["name"], "--repo", repo, "--force",
-               "--color", label["color"], "--description", label["description"])
+            gh(
+                "label",
+                "create",
+                label["name"],
+                "--repo",
+                repo,
+                "--force",
+                "--color",
+                label["color"],
+                "--description",
+                label["description"],
+            )
     missing_topics = sorted(set(topics) - existing_topics)
     for topic in missing_topics:
         print(f"Add topic: {repo} {topic}")
     if args.apply and missing_topics:
         topic_args = [arg for topic in missing_topics for arg in ("--add-topic", topic)]
         gh("repo", "edit", repo, *topic_args)
-    print(f"{changes} label change(s), {len(missing_topics)} topic addition(s); "
-          f"{'applied' if args.apply else 'dry run (use --apply to write)'}. "
-          "Unmanaged labels and topics are preserved.")
+    print(
+        f"{changes} label change(s), {len(missing_topics)} topic addition(s); "
+        f"{'applied' if args.apply else 'dry run (use --apply to write)'}. "
+        "Unmanaged labels and topics are preserved."
+    )
 
 
 if __name__ == "__main__":

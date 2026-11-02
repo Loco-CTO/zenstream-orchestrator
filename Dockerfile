@@ -8,7 +8,7 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY frontend/ ./
 RUN npm run build && test -f /frontend/out/web/login/index.html
 
-FROM python:3.14-slim
+FROM python:3.15-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \

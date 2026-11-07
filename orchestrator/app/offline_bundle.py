@@ -1,7 +1,7 @@
 import hashlib
 import json
-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 from typing import Literal
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from app.account_sync import field_revision
 from app.ffmpeg_supervisor import FFmpegCancelled, FFmpegError, run_ffmpeg

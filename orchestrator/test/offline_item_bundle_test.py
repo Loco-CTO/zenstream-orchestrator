@@ -4,12 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from api.zenstream import offline_routes
 from app.offline_bundle import external_subtitles, item_bundle
-from fastapi import HTTPException
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.responses import Response
-from api.zenstream import offline_routes
 
 
 class OfflineItemBundleTest(unittest.TestCase):
@@ -181,21 +180,24 @@ class OfflineItemBundleRoutesTest(unittest.TestCase):
 
     def test_subtitle_delivery_validates_source_membership_and_revision(self):
         url = "/api/offline/items/movie/subtitles/japanese.vtt?sourceId=source&sourceRevision=revision&v=current"
-        with patch.object(
-            offline_routes,
-            "run_foreground",
-            AsyncMock(
-                return_value=(
-                    "unchanged",
-                    "revision",
-                    [{"fileId": "japanese", "revision": "current"}],
-                )
+        with (
+            patch.object(
+                offline_routes,
+                "run_foreground",
+                AsyncMock(
+                    return_value=(
+                        "unchanged",
+                        "revision",
+                        [{"fileId": "japanese", "revision": "current"}],
+                    )
+                ),
             ),
-        ), patch.object(
-            offline_routes,
-            "subtitle",
-            AsyncMock(return_value=Response("WEBVTT", media_type="text/vtt")),
-        ) as deliver:
+            patch.object(
+                offline_routes,
+                "subtitle",
+                AsyncMock(return_value=Response("WEBVTT", media_type="text/vtt")),
+            ) as deliver,
+        ):
             result = self.client.get(url)
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.text, "WEBVTT")
@@ -209,11 +211,14 @@ class OfflineItemBundleRoutesTest(unittest.TestCase):
             )
 
     def test_source_replacement_blocks_attachment_delivery(self):
-        with patch.object(
-            offline_routes,
-            "run_foreground",
-            AsyncMock(return_value=("changed", "new", [])),
-        ), patch.object(offline_routes, "subtitle", AsyncMock()) as deliver:
+        with (
+            patch.object(
+                offline_routes,
+                "run_foreground",
+                AsyncMock(return_value=("changed", "new", [])),
+            ),
+            patch.object(offline_routes, "subtitle", AsyncMock()) as deliver,
+        ):
             response = self.client.get(
                 "/api/offline/items/movie/subtitles/japanese.vtt?sourceId=source&sourceRevision=old"
             )

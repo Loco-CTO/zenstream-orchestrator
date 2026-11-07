@@ -2,19 +2,72 @@ from app.config import Config
 from app.foreground import run_control, run_foreground
 from app.offline import OfflineService
 from app.offline_assets import OfflineAssetRequest, OfflineAssets, byte_range
-from app.offline_bundle import bundle, supplement_path
+from app.offline_bundle import bundle, external_subtitles, item_bundle, supplement_path
 from app.offline_reconcile import OfflineReconciler, OfflineReconcileRequest
 from app.offline_selections import OfflineSelectionRequest, OfflineSelections
 from app.offline_sync import AccountSyncRequest, AccountSyncService
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import ValidationError
 from starlette.background import BackgroundTask
 
-from api.zenstream.client_routes import _bounded_json_object, _require_account, catalog
+from api.zenstream.client_routes import (
+    _bounded_json_object,
+    _require_account,
+    catalog,
+    subtitle,
+)
 
 router = APIRouter()
+
+
+@router.get("/api/offline/items/{item_id}/bundle")
+async def get_offline_item_bundle(
+    item_id: str,
+    request: Request,
+    sourceId: str = Query(min_length=1, max_length=200),
+    sourceRevision: str = Query(min_length=1, max_length=200),
+    language: str = Query("en", min_length=2, max_length=30),
+):
+    account, _ = await _require_account(request)
+    return await run_foreground(
+        item_bundle,
+        OfflineAssets(catalog),
+        account["id"],
+        item_id,
+        sourceId,
+        sourceRevision,
+        language,
+    )
+
+
+@router.get("/api/offline/items/{item_id}/subtitles/{file_id}.vtt")
+async def get_offline_item_subtitle(
+    item_id: str,
+    file_id: str,
+    request: Request,
+    sourceId: str = Query(min_length=1, max_length=200),
+    sourceRevision: str = Query(min_length=1, max_length=200),
+    v: str | None = Query(None, max_length=200),
+):
+    account, _ = await _require_account(request)
+    status, _, tracks = await run_foreground(
+        external_subtitles,
+        OfflineAssets(catalog),
+        account["id"],
+        item_id,
+        sourceId,
+        sourceRevision,
+    )
+    if status != "unchanged":
+        raise HTTPException(409, "The downloaded media source changed.")
+    selected = next((track for track in tracks if track["fileId"] == file_id), None)
+    if selected is None:
+        raise HTTPException(404, "Subtitle does not belong to this source.")
+    if v is not None and selected["revision"] != v:
+        raise HTTPException(409, "The subtitle changed; refresh its descriptor.")
+    return await subtitle(item_id, file_id, request)
 
 
 @router.post("/api/offline/reconcile")

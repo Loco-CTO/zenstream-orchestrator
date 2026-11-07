@@ -9776,6 +9776,89 @@
       }
     },
     {
+      "operationId": "get_api_offline_items_by_item_id_bundle",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "item_id": "fixture-id"
+          },
+          "query": {
+            "language": "xx",
+            "sourceId": "fixture-id",
+            "sourceRevision": "x"
+          }
+        },
+        "path": "/api/offline/items/fixture-id/bundle",
+        "pathTemplate": "/api/offline/items/{item_id}/bundle"
+      },
+      "response": {
+        "body": {
+          "artwork": [
+            {}
+          ],
+          "availableSources": [
+            {}
+          ],
+          "chapters": [
+            {}
+          ],
+          "episodeNeighbors": {
+            "fixtureKey": "x"
+          },
+          "itemId": "fixture-id",
+          "items": [
+            {}
+          ],
+          "language": "x",
+          "lyrics": {},
+          "presentationRevision": "x",
+          "segments": [
+            {}
+          ],
+          "source": {},
+          "sourceRevision": "x",
+          "sourceStatus": "unchanged",
+          "stateRevisions": {},
+          "subtitleScope": "external",
+          "subtitles": [
+            {}
+          ],
+          "supplementRevision": "x",
+          "warnings": [
+            "x"
+          ]
+        },
+        "contentType": "application/json",
+        "schemaRef": "#/components/schemas/OfflineItemBundleResponse",
+        "status": 200
+      }
+    },
+    {
+      "operationId": "get_api_offline_items_by_item_id_subtitles_by_file_id_vtt",
+      "request": {
+        "method": "GET",
+        "parameters": {
+          "path": {
+            "file_id": "fixture-id",
+            "item_id": "fixture-id"
+          },
+          "query": {
+            "sourceId": "fixture-id",
+            "sourceRevision": "x",
+            "v": "x"
+          }
+        },
+        "path": "/api/offline/items/fixture-id/subtitles/fixture-id.vtt",
+        "pathTemplate": "/api/offline/items/{item_id}/subtitles/{file_id}.vtt"
+      },
+      "response": {
+        "body": "fixture-binary-payload",
+        "contentType": "text/vtt",
+        "status": 200
+      }
+    },
+    {
       "operationId": "post_api_offline_reconcile",
       "request": {
         "body": {

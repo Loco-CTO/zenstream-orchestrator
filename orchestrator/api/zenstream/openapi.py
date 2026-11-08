@@ -14,7 +14,7 @@ from copy import deepcopy
 from typing import Any, Literal
 
 from app.offline_assets import OfflineAssetRequest, OfflineAssetResponse
-from app.offline_bundle import OfflineBundleResponse
+from app.offline_bundle import OfflineBundleResponse, OfflineItemBundleResponse
 from app.offline_reconcile import OfflineReconcileRequest, OfflineReconcileResponse
 from app.offline_selections import OfflineSelectionRequest, OfflineSelectionResponse
 from app.offline_sync import AccountSyncRequest, AccountSyncResponse
@@ -1549,6 +1549,7 @@ DOC_MODELS: tuple[type[BaseModel], ...] = (
     OfflineReconcileRequest,
     OfflineReconcileResponse,
     OfflineBundleResponse,
+    OfflineItemBundleResponse,
     OfflineAssetRequest,
     OfflineAssetResponse,
     OfflineSelectionRequest,
@@ -2726,6 +2727,7 @@ _NO_CONTENT_RESPONSES = frozenset(
 _RESPONSE_MODELS: dict[tuple[str, str], type[BaseModel]] = {
     ("POST", "/api/offline/reconcile"): OfflineReconcileResponse,
     ("GET", "/api/offline/assets/{asset_id}/bundle"): OfflineBundleResponse,
+    ("GET", "/api/offline/items/{item_id}/bundle"): OfflineItemBundleResponse,
     ("POST", "/api/offline/assets"): OfflineAssetResponse,
     ("GET", "/api/offline/assets/{asset_id}"): OfflineAssetResponse,
     ("POST", "/api/offline/selections"): OfflineSelectionResponse,

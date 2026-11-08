@@ -1,5 +1,6 @@
 import hashlib
 import json
+from typing import Literal
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from app.account_sync import field_revision
@@ -34,6 +35,120 @@ class OfflineBundleResponse(BaseModel):
     presentationRevision: str
     supplementRevision: str
     warnings: list[str] = Field(default_factory=list)
+
+
+class OfflineItemBundleResponse(OfflineBundleResponse):
+    sourceStatus: Literal["unchanged", "changed", "unavailable"]
+    sourceRevision: str | None = None
+    subtitleScope: Literal["external"] = "external"
+    source: dict | None = None
+    availableSources: list[dict] = Field(default_factory=list)
+
+
+def external_subtitles(assets, user, entity, source_id, source_revision):
+    """Read current sidecars for one unchanged source, without a prepared-asset lease."""
+    assets.catalog.require_entity(user, entity)
+    try:
+        source = assets.source(user, entity, source_id)
+    except (HTTPException, OSError):
+        return "unavailable", None, []
+    current = source["revision"]
+    if current != source_revision:
+        return "changed", current, []
+    sources = assets.media.sources(user, entity)
+    selected = next((value for value in sources if value["id"] == source_id), None)
+    if selected is None:
+        return "unavailable", None, []
+    subtitles = []
+    for stream in selected.get("streams", []):
+        file_id = stream.get("fileId")
+        if (
+            not file_id
+            or stream.get("kind") != "subtitle"
+            or stream.get("codec_name") not in TEXT_SUBTITLES
+        ):
+            continue
+        _, path = assets.media._file_path(entity, file_id, role="subtitle")
+        if path.stat().st_size > 16 * 1024 * 1024:
+            raise HTTPException(413, "Subtitle is too large to cache.")
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        tags = stream.get("tags") or {}
+        version = revision([file_id, digest, tags])
+        query = urlencode(
+            {"sourceId": source_id, "sourceRevision": current, "v": version}
+        )
+        subtitles.append(
+            {
+                "id": f"file:{file_id}",
+                "fileId": file_id,
+                "index": stream["index"],
+                "codec": "webvtt",
+                "mode": "text",
+                "language": tags.get("language"),
+                "name": tags.get("title"),
+                "revision": version,
+                "url": f"/api/offline/items/{quote(entity, safe='')}/subtitles/{quote(file_id, safe='')}.vtt?{query}",
+            }
+        )
+    return "unchanged", current, sorted(subtitles, key=lambda value: value["id"])
+
+
+def item_bundle(assets, user, entity, source_id, source_revision, language):
+    status, current, subtitles = external_subtitles(
+        assets, user, entity, source_id, source_revision
+    )
+    result = presentation_bundle(
+        assets, user, entity, language, {"sourceId": source_id}, subtitles, []
+    )
+    result.update(sourceStatus=status, sourceRevision=current, subtitleScope="external")
+    sources = []
+    for candidate in assets.media.sources(user, entity)[:20]:
+        try:
+            value = assets.source(user, entity, candidate["id"])
+        except (HTTPException, OSError):
+            continue
+        sources.append(
+            {
+                "id": value["id"],
+                "revision": value["revision"],
+                "sizeBytes": value["size"],
+                "durationSeconds": value.get("durationSeconds"),
+                "height": value.get("height"),
+                "videoCodec": value.get("videoCodec"),
+                "audioCodec": value.get("audioCodec"),
+                "streams": [
+                    {
+                        **{
+                            key: stream[key]
+                            for key in (
+                                "index",
+                                "codec_type",
+                                "codec_name",
+                                "kind",
+                                "fileId",
+                                "color_transfer",
+                            )
+                            if key in stream
+                        },
+                        "tags": {
+                            key: value
+                            for key, value in (stream.get("tags") or {}).items()
+                            if key in {"language", "title"}
+                        },
+                    }
+                    for stream in candidate.get("streams", [])
+                ],
+            }
+        )
+    result.update(
+        availableSources=sources,
+        source=next((value for value in sources if value["id"] == source_id), None),
+    )
+    if status != "unchanged":
+        result.update(
+            subtitles=[], chapters=[], segments=[], lyrics=None, episodeNeighbors=None
+        )
+    return result
 
 
 def episode_neighbors(catalog, user, identity):
@@ -214,9 +329,6 @@ def bundle(assets, user_id, identity, language):
         raise HTTPException(409, "Download asset is not ready.")
     request = json.loads(raw)
     prepared = json.loads(result)
-    ids = OfflineSelections(assets.catalog).parents([entity])
-    items = assets.catalog.items_by_ids(user_id, ids, language)
-    artwork = artwork_descriptors(items, language)
     subtitles = []
     warnings = list(prepared.get("warnings", []))
     for item in prepared.get("supplements", []):
@@ -242,6 +354,17 @@ def bundle(assets, user_id, identity, language):
             )
         except (HTTPException, OSError):
             warnings.append("selected_subtitle_unavailable")
+    return presentation_bundle(
+        assets, user_id, entity, language, request, subtitles, warnings
+    )
+
+
+def presentation_bundle(
+    assets, user_id, entity, language, request, subtitles, warnings
+):
+    ids = OfflineSelections(assets.catalog).parents([entity])
+    items = assets.catalog.items_by_ids(user_id, ids, language)
+    artwork = artwork_descriptors(items, language)
     lyrics = None
     if assets.catalog.require_entity(user_id, entity)[3] == "track":
         try:

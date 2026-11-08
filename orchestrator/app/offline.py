@@ -32,6 +32,7 @@ class OfflineService:
                 "assets",
                 "bundles",
                 "reconcile",
+                "item-bundle-refresh",
             ],
             "profiles": profiles,
             "hdrToneMapping": conversions["toneMapping"],

@@ -11,6 +11,7 @@ name: Windows launcher
     paths:
       - "launcher/**"
       - "scripts/build-windows.ps1"
+      - "scripts/pack-windows.ps1"
       - "scripts/smoke-windows-backend.mjs"
       - "orchestrator/**"
       - "frontend/**"

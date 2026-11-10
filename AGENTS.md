@@ -32,6 +32,7 @@ This repository owns the FastAPI Orchestrator, SQLite persistence, catalog scann
 - `python orchestrator/scripts/export_openapi.py --check` — check OpenAPI freshness.
 - `python orchestrator/scripts/generate_contract_fixtures.py --check` — check fixture freshness.
 - From `launcher/`: `npm ci` and `npm test` — launcher tests.
+- `scripts/build-windows.ps1` creates Windows release artifacts; `.github/workflows/release.yaml` owns draft release creation and asset uploads.
 
 ## Documentation conventions
 

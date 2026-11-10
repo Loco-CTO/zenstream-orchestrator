@@ -33,7 +33,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Launcher build failed." }
 
         $electronBuilder = Join-Path $launcherRoot "node_modules\.bin\electron-builder.cmd"
-        & $electronBuilder --win nsis portable --x64 "--config.directories.output=$packageRoot"
+        & $electronBuilder --win nsis portable --x64 --publish never "--config.directories.output=$packageRoot"
         if ($LASTEXITCODE -ne 0) { throw "Windows installer packaging failed." }
 
         $archivePath = Join-Path $packageRoot "win-unpacked\resources\app.asar"

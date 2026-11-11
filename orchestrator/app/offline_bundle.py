@@ -21,6 +21,21 @@ def revision(value):
     ).hexdigest()
 
 
+def supplement_revision(bundle: dict) -> str:
+    return revision(
+        [
+            bundle[key]
+            for key in (
+                "subtitles",
+                "lyrics",
+                "chapters",
+                "segments",
+                "episodeNeighbors",
+            )
+        ]
+    )
+
+
 class OfflineBundleResponse(BaseModel):
     itemId: str
     language: str
@@ -407,7 +422,7 @@ def presentation_bundle(
         for item in items
     ]
     neighbors = episode_neighbors(assets.catalog, user_id, entity)
-    return {
+    result = {
         "itemId": entity,
         "language": language,
         "items": items,
@@ -419,11 +434,10 @@ def presentation_bundle(
         "episodeNeighbors": neighbors,
         "stateRevisions": states,
         "presentationRevision": revision(presentation),
-        "supplementRevision": revision(
-            [subtitles, lyrics, chapters, segments, neighbors]
-        ),
         "warnings": warnings,
     }
+    result["supplementRevision"] = supplement_revision(result)
+    return result
 
 
 def supplement_path(assets, user, identity, index):

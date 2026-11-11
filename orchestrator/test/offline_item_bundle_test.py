@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from api.zenstream import offline_routes
+from app.netease_lyrics import NetEaseUnavailable
 from app.offline_bundle import external_subtitles, item_bundle
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
@@ -209,6 +210,57 @@ class OfflineItemBundleRoutesTest(unittest.TestCase):
                 self.client.get(url.replace("/japanese.vtt", "/other.vtt")).status_code,
                 404,
             )
+
+    def test_prepared_download_opts_into_local_first_netease_lyrics(self):
+        url = "/api/offline/assets/asset/bundle"
+        track = {"id": "track", "type": "track"}
+        local = {"source": "sidecar", "lines": [{"text": "Local"}]}
+        remote = {"source": "netease", "lines": [{"text": "Remote"}]}
+        payload = {
+            "itemId": "track",
+            "items": [track],
+            "lyrics": None,
+            "subtitles": [],
+            "chapters": [],
+            "segments": [],
+            "episodeNeighbors": None,
+            "warnings": [],
+            "supplementRevision": "local-revision",
+        }
+        with (
+            patch.object(
+                offline_routes,
+                "run_foreground",
+                AsyncMock(
+                    side_effect=[
+                        dict(payload),
+                        {**payload, "lyrics": local},
+                        dict(payload),
+                        dict(payload),
+                    ]
+                ),
+            ),
+            patch.object(offline_routes, "netease_enabled", return_value=True),
+            patch.object(
+                offline_routes,
+                "fetch_netease_lyrics",
+                AsyncMock(side_effect=[remote, NetEaseUnavailable()]),
+            ) as lookup,
+        ):
+            self.assertIsNone(self.client.get(url).json()["lyrics"])
+            self.assertEqual(
+                self.client.get(url, params={"fallback": "netease"}).json()["lyrics"],
+                local,
+            )
+            lookup.assert_not_awaited()
+            result = self.client.get(url, params={"fallback": "netease"}).json()
+            self.assertEqual(result["lyrics"], remote)
+            self.assertNotEqual(result["supplementRevision"], "local-revision")
+            lookup.assert_awaited_once_with(track)
+            response = self.client.get(url, params={"fallback": "netease"})
+            self.assertEqual(response.status_code, 200)
+            self.assertIsNone(response.json()["lyrics"])
+            self.assertIn("lyrics_unavailable", response.json()["warnings"])
 
     def test_source_replacement_blocks_attachment_delivery(self):
         with (

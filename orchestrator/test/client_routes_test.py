@@ -779,13 +779,55 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             patch.object(
                 client_routes, "run_control", new=AsyncMock(return_value=payload)
             ) as control,
+            patch.object(client_routes, "netease_enabled", return_value=True),
+            patch.object(client_routes, "fetch_netease_lyrics", AsyncMock()) as lookup,
         ):
-            response = asyncio.run(client_routes.playback_lyrics("track-1", request))
+            response = asyncio.run(
+                client_routes.playback_lyrics("track-1", request, fallback="netease")
+            )
 
         self.assertEqual(response, payload)
         control.assert_awaited_once_with(
             client_routes.media.lyrics, "user-1", "track-1"
         )
+        lookup.assert_not_awaited()
+
+    def test_lyrics_route_looks_up_netease_only_on_an_explicit_local_miss(self):
+        request = _json_request(
+            {}, method="GET", path="/api/playback/items/track-1/lyrics"
+        )
+        track = {"id": "track-1", "type": "track"}
+        local = {"trackId": "track-1", "lyrics": None}
+        lyrics = {"source": "netease", "timed": False, "lines": [{"text": "First"}]}
+        with (
+            patch.object(
+                client_routes,
+                "_require_access",
+                AsyncMock(return_value={"id": "user-1"}),
+            ),
+            patch.object(
+                client_routes,
+                "run_control",
+                AsyncMock(side_effect=[dict(local), dict(local), track]),
+            ),
+            patch.object(client_routes, "netease_enabled", return_value=True),
+            patch.object(
+                client_routes, "fetch_netease_lyrics", AsyncMock(return_value=lyrics)
+            ) as lookup,
+        ):
+            self.assertEqual(
+                asyncio.run(client_routes.playback_lyrics("track-1", request)), local
+            )
+            lookup.assert_not_awaited()
+            self.assertEqual(
+                asyncio.run(
+                    client_routes.playback_lyrics(
+                        "track-1", request, fallback="netease"
+                    )
+                ),
+                {"trackId": "track-1", "lyrics": lyrics},
+            )
+            lookup.assert_awaited_once_with(track)
 
     def test_versioned_cached_image_uses_stored_version_without_rehashing(self):
         request = _json_request(

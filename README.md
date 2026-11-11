@@ -39,6 +39,7 @@ Copy `.env.example` to `.env`. The main settings are:
 - `METADATA_PATH`: writable persistent directory for the database and caches. Docker mounts it at `/app/sqlite`.
 - `ORCHESTRATOR_HOST` and `ORCHESTRATOR_PORT`: server bind address and port.
 - `ZENSTREAM_PUBLIC_WEB_URL` and `CORS_ORIGINS`: optional settings for a separately hosted web client.
+- `ZENSTREAM_NETEASE_LYRICS=1` enables the optional lyrics fallback when a client opens Lyrics or saves a music download. The server checks embedded and sidecar lyrics first and sends the artist and track title to NetEase only on a miss.
 
 Do not commit `.env` files or credentials. See `.env.example` for the complete list of settings.
 

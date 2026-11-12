@@ -47,7 +47,10 @@ export class ConfigStore {
   }
 
   async load(): Promise<EditableConfig> {
-    const defaults = defaultEnvironment(this.localAppData);
+    const defaults = defaultEnvironment(
+      this.localAppData,
+      process.env.ZENSTREAM_NETEASE_LYRICS,
+    );
     try {
       const raw = JSON.parse(
         await readFile(this.configPath, "utf8"),

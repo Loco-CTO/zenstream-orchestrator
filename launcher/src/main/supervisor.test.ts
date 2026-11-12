@@ -25,6 +25,7 @@ describe("backend supervisor helpers", () => {
         AUTH_WORKERS: "old",
         CONTROL_QUEUE: "old",
         AUTH_QUEUE: "old",
+        ZENSTREAM_NETEASE_LYRICS: "1",
         PATH: "system",
       },
       {
@@ -34,6 +35,7 @@ describe("backend supervisor helpers", () => {
         AUTH_WORKERS: "",
         CONTROL_QUEUE: "",
         AUTH_QUEUE: "",
+        ZENSTREAM_NETEASE_LYRICS: "0",
       },
     );
     expect(environment.SECRET_KEY).toBe("new");
@@ -42,6 +44,7 @@ describe("backend supervisor helpers", () => {
     expect(environment.AUTH_WORKERS).toBeUndefined();
     expect(environment.CONTROL_QUEUE).toBeUndefined();
     expect(environment.AUTH_QUEUE).toBeUndefined();
+    expect(environment.ZENSTREAM_NETEASE_LYRICS).toBe("0");
     expect(environment.PATH).toBe("system");
     expect(environment.PYTHONUNBUFFERED).toBe("1");
   });

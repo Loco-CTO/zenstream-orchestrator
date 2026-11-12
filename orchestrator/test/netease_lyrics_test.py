@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-from app.netease_lyrics import NetEaseUnavailable, fetch_netease_lyrics
+from app.netease_lyrics import NetEaseUnavailable, fetch_netease_lyrics, netease_enabled
 
 TRACK = {
     "type": "track",
@@ -24,6 +24,16 @@ def song(song_id, *, title="A Song", artist="Artist", album="Record", duration=2
 
 
 class NetEaseLyricsTest(unittest.IsolatedAsyncioTestCase):
+    def test_fallback_is_enabled_by_default_and_honors_explicit_opt_out(self):
+        with patch.dict("os.environ", clear=True):
+            self.assertTrue(netease_enabled())
+        for value in ("0", "false", "off", ""):
+            with (
+                self.subTest(value=value),
+                patch.dict("os.environ", {"ZENSTREAM_NETEASE_LYRICS": value}),
+            ):
+                self.assertFalse(netease_enabled())
+
     async def lookup(self, handler):
         client = httpx.AsyncClient
         with patch(

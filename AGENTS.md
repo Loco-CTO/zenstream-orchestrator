@@ -19,6 +19,7 @@ This repository owns the FastAPI Orchestrator, SQLite persistence, catalog scann
 
 - Keep route declarations in `orchestrator/api/`; `orchestrator/app/app.py` composes middleware, lifespan, routers, and mounts.
 - Offline item-bundle maintenance is independent of prepared-asset reservations. Preserve exact-source subtitle association and the external-only snapshot contract; see `docs/offline.md`.
+- Keep NetEase lyrics lookup opt-in at the playback and prepared download bundle routes. Local lyrics resolution and background item-bundle maintenance must work without provider access.
 - The curated API contract is assembled in `orchestrator/api/zenstream/openapi.py`. After adding or changing client APIs, use the exporter and fixture generator in `orchestrator/scripts/`; never hand-edit generated snapshots or fixtures. See `contracts/README.md`.
 - Keep admin dashboard work in `frontend/` and Windows host work in `launcher/`. Dashboard route components own production markup and must preserve the static `/web/*` route contract.
 - Read `docs/catalog-scanning.md`, `docs/calendar.md`, or `docs/auth-and-playback.md` when changing those domains.

@@ -29600,6 +29600,25 @@
               "title": "Language",
               "type": "string"
             }
+          },
+          {
+            "description": "Include NetEase lyrics when the download has no local lyrics.",
+            "in": "query",
+            "name": "fallback",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "netease",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Include NetEase lyrics when the download has no local lyrics.",
+              "title": "Fallback"
+            }
           }
         ],
         "responses": {
@@ -30972,6 +30991,25 @@
             "schema": {
               "title": "Entity Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Look up NetEase lyrics when the track has no local lyrics.",
+            "in": "query",
+            "name": "fallback",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "const": "netease",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Look up NetEase lyrics when the track has no local lyrics.",
+              "title": "Fallback"
             }
           },
           {

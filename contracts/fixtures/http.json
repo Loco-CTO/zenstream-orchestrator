@@ -9645,6 +9645,7 @@
             "asset_id": "fixture-id"
           },
           "query": {
+            "fallback": "netease",
             "language": "xx"
           }
         },
@@ -10050,7 +10051,8 @@
             "entity_id": "fixture-id"
           },
           "query": {
-            "access": "<redacted>"
+            "access": "<redacted>",
+            "fallback": "netease"
           }
         },
         "path": "/api/playback/items/fixture-id/lyrics",

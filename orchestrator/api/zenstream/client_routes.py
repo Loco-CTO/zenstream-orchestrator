@@ -9,6 +9,7 @@ import time
 import uuid
 from collections import defaultdict, deque
 from pathlib import Path
+from typing import Annotated
 
 from app.artwork_variants import (
     ArtworkVariantSource,
@@ -57,6 +58,12 @@ from app.models.account import Account, RefreshTokenError
 from app.models.account_preference import AccountPreference
 from app.models.metadata import MetadataLanguageSettings
 from app.models.playback_viewer import PlaybackViewerStore, normalize_device_metadata
+from app.netease_lyrics import (
+    LyricsFallback,
+    NetEaseUnavailable,
+    fetch_netease_lyrics,
+    netease_enabled,
+)
 from app.playback import PlaybackManager, ffmpeg_path
 from app.playlists import PlaylistService
 from app.trickplay import TrickplayExtractor
@@ -2041,10 +2048,29 @@ def _lyrics_to_vtt(source: Path) -> str:
     return lyrics_to_vtt(source.read_text(encoding="utf-8-sig", errors="replace"))
 
 
-@router.get("/api/playback/items/{entity_id}/lyrics")
-async def playback_lyrics(entity_id: str, request: Request):
+@router.get(
+    "/api/playback/items/{entity_id}/lyrics",
+    responses={503: {"description": "The NetEase lyrics provider is unavailable."}},
+)
+async def playback_lyrics(
+    entity_id: str,
+    request: Request,
+    fallback: Annotated[
+        LyricsFallback | None,
+        Query(description="Look up NetEase lyrics when the track has no local lyrics."),
+    ] = None,
+):
     account = await _require_access(request)
-    return await run_control(media.lyrics, account["id"], entity_id)
+    result = await run_control(media.lyrics, account["id"], entity_id)
+    if result["lyrics"] is None and fallback == "netease" and netease_enabled():
+        track = await run_control(catalog.item, account["id"], entity_id, "en")
+        try:
+            result["lyrics"] = await fetch_netease_lyrics(track)
+        except NetEaseUnavailable as exc:
+            raise HTTPException(
+                503, "NetEase lyrics are temporarily unavailable."
+            ) from exc
+    return result
 
 
 def _prepare_subtitle(

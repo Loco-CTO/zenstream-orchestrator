@@ -1,8 +1,22 @@
+from typing import Annotated
+
 from app.config import Config
 from app.foreground import run_control, run_foreground
+from app.netease_lyrics import (
+    LyricsFallback,
+    NetEaseUnavailable,
+    fetch_netease_lyrics,
+    netease_enabled,
+)
 from app.offline import OfflineService
 from app.offline_assets import OfflineAssetRequest, OfflineAssets, byte_range
-from app.offline_bundle import bundle, external_subtitles, item_bundle, supplement_path
+from app.offline_bundle import (
+    bundle,
+    external_subtitles,
+    item_bundle,
+    supplement_path,
+    supplement_revision,
+)
 from app.offline_reconcile import OfflineReconciler, OfflineReconcileRequest
 from app.offline_selections import OfflineSelectionRequest, OfflineSelections
 from app.offline_sync import AccountSyncRequest, AccountSyncService
@@ -89,11 +103,34 @@ async def get_offline_bundle(
     asset_id: str,
     request: Request,
     language: str = Query("en", min_length=2, max_length=30),
+    fallback: Annotated[
+        LyricsFallback | None,
+        Query(
+            description="Include NetEase lyrics when the download has no local lyrics."
+        ),
+    ] = None,
 ):
     account, _ = await _require_account(request)
-    return await run_foreground(
+    result = await run_foreground(
         bundle, OfflineAssets(catalog), account["id"], asset_id, language
     )
+    if (
+        result["lyrics"] is None
+        and "lyrics_unavailable" not in result["warnings"]
+        and fallback == "netease"
+        and netease_enabled()
+    ):
+        track = next(
+            (item for item in result["items"] if item["id"] == result["itemId"]), None
+        )
+        if track is not None:
+            try:
+                result["lyrics"] = await fetch_netease_lyrics(track)
+            except NetEaseUnavailable:
+                result["warnings"].append("lyrics_unavailable")
+            if result["lyrics"] is not None:
+                result["supplementRevision"] = supplement_revision(result)
+    return result
 
 
 @router.get("/api/offline/assets/{asset_id}/supplements/{index}.vtt")

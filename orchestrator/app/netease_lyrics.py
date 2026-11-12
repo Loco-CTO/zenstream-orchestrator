@@ -20,7 +20,7 @@ class NetEaseUnavailable(Exception):
 
 
 def netease_enabled() -> bool:
-    return os.getenv("ZENSTREAM_NETEASE_LYRICS", "").strip().lower() in {
+    return os.getenv("ZENSTREAM_NETEASE_LYRICS", "1").strip().lower() in {
         "1",
         "true",
         "yes",

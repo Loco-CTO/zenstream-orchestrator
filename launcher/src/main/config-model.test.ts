@@ -11,6 +11,7 @@ describe("launcher environment configuration", () => {
     expect(values.ORCHESTRATOR_HOST).toBe("127.0.0.1");
     expect(values.ORCHESTRATOR_PORT).toBe("9088");
     expect(values.ZENSTREAM_PUBLIC_WEB_URL).toBe("");
+    expect(values.ZENSTREAM_NETEASE_LYRICS).toBe("1");
     expect(values.METADATA_PATH).toContain("ZenStream Orchestrator");
     expect(values.MAX_TRANSCODES).toBe("0");
     expect(values.CONTROL_WORKERS).toBe("8");
@@ -26,11 +27,29 @@ describe("launcher environment configuration", () => {
       defaults,
     );
     expect(normalized.ORCHESTRATOR_PORT).toBe("9191");
+    expect(normalized.ZENSTREAM_NETEASE_LYRICS).toBe("1");
     expect(normalized.FOREGROUND_WORKERS).toBe("16");
     expect(normalized.CONTROL_WORKERS).toBe("8");
     expect(normalized.AUTH_WORKERS).toBe("4");
     expect(normalized.CONTROL_QUEUE).toBe("32");
     expect(normalized.AUTH_QUEUE).toBe("16");
+  });
+
+  it("honors the existing environment preference until the launcher saves a choice", () => {
+    const defaults = defaultEnvironment("C:\\Data", " off ");
+    expect(normalizeEnvironment({}, defaults).ZENSTREAM_NETEASE_LYRICS).toBe(
+      "0",
+    );
+    expect(
+      normalizeEnvironment({ ZENSTREAM_NETEASE_LYRICS: "1" }, defaults)
+        .ZENSTREAM_NETEASE_LYRICS,
+    ).toBe("1");
+    expect(
+      normalizeEnvironment(
+        { ZENSTREAM_NETEASE_LYRICS: "0" },
+        defaultEnvironment("C:\\Data", "yes"),
+      ).ZENSTREAM_NETEASE_LYRICS,
+    ).toBe("0");
   });
 
   it("rejects unsafe numeric and origin values", () => {

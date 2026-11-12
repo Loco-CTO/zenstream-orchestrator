@@ -6,7 +6,16 @@ import {
   type EnvironmentKey,
 } from "../shared";
 
-export function defaultEnvironment(localAppData: string): EnvironmentConfig {
+function neteaseSetting(value: string): string {
+  return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
+    ? "1"
+    : "0";
+}
+
+export function defaultEnvironment(
+  localAppData: string,
+  inheritedNetEase = "1",
+): EnvironmentConfig {
   return {
     ORCHESTRATOR_HOST: "127.0.0.1",
     ORCHESTRATOR_PORT: "9088",
@@ -24,6 +33,7 @@ export function defaultEnvironment(localAppData: string): EnvironmentConfig {
     MAX_TRANSCODES: "0",
     MAX_TRANSCODES_PER_USER: "0",
     PLAYBACK_SESSION_IDLE_TIMEOUT_SECONDS: "45",
+    ZENSTREAM_NETEASE_LYRICS: neteaseSetting(inheritedNetEase),
     FOREGROUND_WORKERS: "16",
     CONTROL_WORKERS: "8",
     AUTH_WORKERS: "4",
@@ -61,12 +71,16 @@ export function normalizeEnvironment(
   input: Partial<Record<EnvironmentKey, unknown>>,
   defaults: EnvironmentConfig,
 ): EnvironmentConfig {
-  return Object.fromEntries(
+  const environment = Object.fromEntries(
     ENVIRONMENT_KEYS.map((key) => [
       key,
       typeof input[key] === "string" ? input[key].trim() : defaults[key],
     ]),
   ) as EnvironmentConfig;
+  environment.ZENSTREAM_NETEASE_LYRICS = neteaseSetting(
+    environment.ZENSTREAM_NETEASE_LYRICS,
+  );
+  return environment;
 }
 
 export function validateEnvironment(environment: EnvironmentConfig): string[] {

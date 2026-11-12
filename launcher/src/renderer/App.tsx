@@ -38,7 +38,7 @@ import type {
 } from "../shared";
 
 type Tab = "configuration" | "logs";
-type InputType = "text" | "number" | "select";
+type InputType = "text" | "number" | "select" | "checkbox";
 
 interface FieldDefinition {
   key: EnvironmentKey;
@@ -149,6 +149,13 @@ const groups: FieldGroup[] = [
         description:
           "Seconds before abandoned FFmpeg sessions are reaped (15–3600).",
         type: "number",
+      },
+      {
+        key: "ZENSTREAM_NETEASE_LYRICS",
+        label: "NetEase lyrics",
+        description:
+          "Look up lyrics on NetEase when local lyrics are missing. Takes effect after restart.",
+        type: "checkbox",
       },
     ],
   },
@@ -668,8 +675,22 @@ function ConfigurationView({
                   <small>{field.description}</small>
                   <code>{field.key}</code>
                 </span>
-                <span className="input-with-action">
-                  {field.type === "select" ? (
+                <span
+                  className={
+                    field.type === "checkbox"
+                      ? "toggle-control"
+                      : "input-with-action"
+                  }
+                >
+                  {field.type === "checkbox" ? (
+                    <input
+                      type="checkbox"
+                      checked={draft[field.key] === "1"}
+                      onChange={(event) =>
+                        onField(field.key, event.target.checked ? "1" : "0")
+                      }
+                    />
+                  ) : field.type === "select" ? (
                     <select
                       value={draft[field.key]}
                       onChange={(event) =>

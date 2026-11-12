@@ -39,7 +39,7 @@ Copy `.env.example` to `.env`. The main settings are:
 - `METADATA_PATH`: writable persistent directory for the database and caches. Docker mounts it at `/app/sqlite`.
 - `ORCHESTRATOR_HOST` and `ORCHESTRATOR_PORT`: server bind address and port.
 - `ZENSTREAM_PUBLIC_WEB_URL` and `CORS_ORIGINS`: optional settings for a separately hosted web client.
-- `ZENSTREAM_NETEASE_LYRICS=1` enables the optional lyrics fallback when a client opens Lyrics or saves a music download. The server checks embedded and sidecar lyrics first and sends the artist and track title to NetEase only on a miss.
+- NetEase lyrics are enabled by default when a client opens Lyrics or saves a music download. The server checks embedded and sidecar lyrics first and sends the artist and track title to NetEase only on a miss. Set `ZENSTREAM_NETEASE_LYRICS=0` to disable the fallback.
 
 Do not commit `.env` files or credentials. See `.env.example` for the complete list of settings.
 
@@ -82,6 +82,8 @@ Use the Quick start setup to run the Orchestrator directly on the host. Native l
 The Windows x64 launcher starts the Orchestrator and administrator dashboard. Download the installer or portable executable from [GitHub Releases](https://github.com/Loco-CTO/zenstream-orchestrator/releases/latest).
 
 Use the launcher's Configuration tab to set the server host and port, public web URL, metadata path, and secret key. The dashboard opens at `http://127.0.0.1:9088/web/` by default. Use the Logs tab when the backend needs attention.
+
+Use **Configuration → Media tools and playback → NetEase lyrics** to change the lyrics fallback, then save and restart the backend.
 
 To build the launcher from Windows with Node.js 24 and Python 3.14:
 

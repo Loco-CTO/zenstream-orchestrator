@@ -119,6 +119,7 @@ npm test
 - [Administrator and launcher interface design](docs/ui-design.md)
 - [Catalog scanning](docs/catalog-scanning.md)
 - [Accounts and playback access](docs/auth-and-playback.md)
+- [Discord webhooks](docs/discord-webhooks.md)
 - [Calendar and jobs](docs/calendar.md)
 - [Offline access](docs/offline.md)
 - [API contracts](contracts/README.md)

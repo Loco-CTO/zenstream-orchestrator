@@ -21,6 +21,7 @@ This repository owns the FastAPI Orchestrator, SQLite persistence, catalog scann
 - Offline item-bundle maintenance is independent of prepared-asset reservations. Preserve exact-source subtitle association and the external-only snapshot contract; see `docs/offline.md`.
 - NetEase lyrics are enabled by default and run only on explicit fallback requests at the playback and prepared download bundle routes. Local lyrics resolution and background item-bundle maintenance work independently of the provider. The Windows launcher manages the opt-out through its saved backend environment.
 - The curated API contract is assembled in `orchestrator/api/zenstream/openapi.py`. After adding or changing client APIs, use the exporter and fixture generator in `orchestrator/scripts/`; never hand-edit generated snapshots or fixtures. See `contracts/README.md`.
+- Discord webhook subscriptions and delivery queues belong to the Orchestrator. Keep their token-bearing URLs and event payloads server side.
 - Keep admin dashboard work in `frontend/` and Windows host work in `launcher/`. Dashboard route components own production markup and must preserve the static `/web/*` route contract.
 - Read `docs/catalog-scanning.md`, `docs/calendar.md`, or `docs/auth-and-playback.md` when changing those domains.
 - Do not edit the installed virtualenv Watchdog package or machine-wide Windows last-access settings. The Windows watcher belongs to `orchestrator/app/filesystem_watcher.py`.

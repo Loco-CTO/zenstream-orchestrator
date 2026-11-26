@@ -23,11 +23,13 @@ from api.zenstream.lumi_routes import router as lumi_router
 from api.zenstream.notification_routes import router as notification_router
 from api.zenstream.offline_routes import router as offline_router
 from api.zenstream.openapi import OPENAPI_DESCRIPTION, OPENAPI_TAGS, install_openapi
+from api.zenstream.webhook_routes import router as webhook_router
 from app.artwork_variants import queue_selected, record_sweep_error
 from app.artwork_variants import stop_all as stop_artwork_variants
 from app.catalog_read_model import CatalogReadModel
 from app.client_auth import browser_origin_regex, browser_origins
 from app.config import Config, load_config
+from app.discord_webhooks import run_dispatcher as run_discord_dispatcher
 from app.foreground import (
     active_auth_work,
     active_control_work,
@@ -169,6 +171,7 @@ async def lifespan(_app: FastAPI):
         finally:
             faulthandler.cancel_dump_traceback_later()
 
+    discord_task = asyncio.create_task(run_discord_dispatcher())
     maintenance_task = asyncio.create_task(maintain_sessions())
     artwork_prewarm_task = asyncio.create_task(prewarm_artwork())
     event_loop_task = asyncio.create_task(monitor_event_loop())
@@ -177,6 +180,7 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         for task in (
+            discord_task,
             maintenance_task,
             artwork_prewarm_task,
             event_loop_task,
@@ -184,6 +188,7 @@ async def lifespan(_app: FastAPI):
         ):
             task.cancel()
         for task in (
+            discord_task,
             maintenance_task,
             artwork_prewarm_task,
             event_loop_task,
@@ -265,6 +270,7 @@ async def request_timing(request, call_next):
 
 
 app.include_router(client_router)
+app.include_router(webhook_router)
 app.include_router(offline_router)
 app.include_router(bazarr_router)
 app.include_router(calendar_router)

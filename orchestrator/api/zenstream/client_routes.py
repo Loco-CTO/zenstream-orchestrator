@@ -46,6 +46,7 @@ from app.client_auth import (
     session_id_for_token,
     websocket_account,
 )
+from app.discord_webhooks import publish as publish_discord
 from app.foreground import run_auth, run_control, run_foreground
 from app.images import LocalArtworkCache
 from app.intro_outro import IntroOutroStore
@@ -715,6 +716,9 @@ async def login(request: Request):
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
+    await run_control(
+        publish_discord, "user.login", user=account["id"], client="ZenStream app"
+    )
     return {**session, "user": account}
 
 
@@ -879,6 +883,7 @@ async def browser_login(request: Request):
     if not authenticated:
         raise HTTPException(401, "Invalid credentials.")
     account, session = authenticated
+    await run_control(publish_discord, "user.login", user=account["id"], client="Web")
     response = JSONResponse({"user": account}, status_code=200)
     _set_browser_session_cookies(response, request, session)
     return response
@@ -971,8 +976,9 @@ async def refresh(request: Request):
 
 @router.post("/api/auth/logout", status_code=204)
 async def logout(request: Request):
-    _, token = await _require_account(request)
+    account, token = await _require_account(request)
     await run_control(Account().revoke, token)
+    await run_control(publish_discord, "user.logout", user=account["id"])
     response = Response(status_code=204)
     _clear_browser_session_cookies(response, request)
     return response

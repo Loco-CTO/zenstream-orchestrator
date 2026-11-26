@@ -20,6 +20,7 @@ import {
 	IconShieldLock,
 	IconSparkles,
 	IconUsers,
+	IconWebhook,
 	IconX,
 } from "@tabler/icons-react";
 import { adminFetch, clearSession, readSession, Session } from "./admin-client";
@@ -30,6 +31,7 @@ const links = [
 	["Libraries", "/web/dashboard/libraries", IconLibrary],
 	["Calendar", "/web/dashboard/calendar", IconCalendar],
 	["Bazarr", "/web/dashboard/bazarr", IconLanguage],
+	["Webhooks", "/web/dashboard/webhooks", IconWebhook],
 	["Metadata", "/web/dashboard/metadata", IconDatabase],
 	["Playback", "/web/dashboard/playback", IconPlayerPlay],
 	["Lumi", "/web/dashboard/lumi", IconBrain],

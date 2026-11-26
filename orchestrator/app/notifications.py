@@ -760,6 +760,8 @@ class NotificationService:
             return 0
         now = _now()
         created = 0
+        from app.discord_webhooks import publish
+
         admitted_tracks: dict[str, list[tuple]] = {}
         with self.db.transaction() as cursor:
             for entity_id in dict.fromkeys(entity_ids):
@@ -785,6 +787,13 @@ class NotificationService:
                         admitted_tracks.setdefault(row[3], []).append(row)
                     continue
 
+                publish(
+                    "library.episode_added"
+                    if row[2] == "episode"
+                    else "library.movie_added",
+                    cursor=cursor,
+                    entity=row[0],
+                )
                 series_row = (
                     self._series_row(cursor, row[0]) if row[2] == "episode" else None
                 )
@@ -895,6 +904,12 @@ class NotificationService:
                 ).fetchone()
                 if not release_row:
                     continue
+                if not cursor.execute(
+                    "SELECT 1 FROM catalog_admissions a JOIN library_entities e "
+                    "ON e.id=a.entity_id WHERE e.parent_id=? AND a.admitted_at<? LIMIT 1",
+                    (release_id, now),
+                ).fetchone():
+                    publish("library.album_added", cursor=cursor, entity=release_id)
                 library_id = release_row[1]
                 artist_ids: list[str] = []
                 primary_artist = cursor.execute(

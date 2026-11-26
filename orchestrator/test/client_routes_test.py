@@ -633,16 +633,11 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
                 "userState": {},
             }
 
-        items = [
-            episode(f"series-a-{index}", "series-a") for index in range(18)
-        ] + [
-            episode(f"series-{index}", f"series-{index}")
-            for index in range(1, 18)
+        items = [episode(f"series-a-{index}", "series-a") for index in range(18)] + [
+            episode(f"series-{index}", f"series-{index}") for index in range(1, 18)
         ]
         payload = {
-            "libraryRows": [
-                {"libraryId": "tv", "stackEpisodes": True, "items": items}
-            ]
+            "libraryRows": [{"libraryId": "tv", "stackEpisodes": True, "items": items}]
         }
 
         compact = client_routes._catalog_response(payload, "card", limit=18)

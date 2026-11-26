@@ -1434,9 +1434,7 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("hidden", rows)
 
         allowed_row = catalog.home_library(user_id, "en", "allowed")
-        self.assertEqual(
-            [item["id"] for item in allowed_row["items"]], ["episode-2"]
-        )
+        self.assertEqual([item["id"] for item in allowed_row["items"]], ["episode-2"])
         self.assertTrue(allowed_row["stackEpisodes"])
         self.assertIsNone(catalog.home_library(user_id, "en", "hidden"))
 
@@ -1494,9 +1492,7 @@ class CatalogTest(unittest.TestCase):
             [item["seriesId"] for item in row["items"][:18]], ["series-00"] * 18
         )
         self.assertEqual(len(row["items"]), 35)
-        self.assertNotIn(
-            "series-00-episode-0", {item["id"] for item in row["items"]}
-        )
+        self.assertNotIn("series-00-episode-0", {item["id"] for item in row["items"]})
         self.assertEqual(
             list(dict.fromkeys(item["seriesId"] for item in row["items"])),
             [f"series-{index:02}" for index in range(18)],

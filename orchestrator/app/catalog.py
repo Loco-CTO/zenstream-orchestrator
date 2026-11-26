@@ -5324,9 +5324,7 @@ class Catalog:
                 "GROUP BY e.id"
             )
         return self.db.execute(
-            "WITH episode_dates AS ("
-            + episode_dates
-            + "), latest_series AS ("
+            "WITH episode_dates AS (" + episode_dates + "), latest_series AS ("
             "SELECT series_id,MAX(last_added_ns) AS latest_ns "
             "FROM episode_dates GROUP BY series_id "
             "ORDER BY latest_ns DESC,series_id LIMIT ?"

@@ -1304,6 +1304,16 @@ async def items(
     libraryId: str = Query(...),
     language: str | None = Query(None),
     parentId: str | None = Query(None),
+    genre: list[str] = Query(default=[]),
+    officialRating: list[str] = Query(default=[]),
+    yearFrom: int | None = Query(None),
+    yearTo: int | None = Query(None),
+    watchState: str | None = Query(None),
+    favoritesOnly: bool = Query(False),
+    artist: list[str] = Query(default=[]),
+    albumArtist: list[str] = Query(default=[]),
+    albumType: list[str] = Query(default=[]),
+    includeFilterOptions: bool = Query(False),
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
     sortBy: str | None = Query(None),
@@ -1324,7 +1334,23 @@ async def items(
         page_size=effective_page_size,
         sort_by=sortBy,
         sort_order=sortOrder,
+        genres=genre,
+        official_ratings=officialRating,
+        year_from=yearFrom,
+        year_to=yearTo,
+        watch_state=watchState,
+        favorites_only=favoritesOnly,
+        artists=artist,
+        album_artists=albumArtist,
+        album_types=albumType,
     )
+    if includeFilterOptions:
+        result["filterOptions"] = await run_foreground(
+            catalog.library_filter_options,
+            account["id"],
+            preferred,
+            libraryId,
+        )
     return _catalog_response(result, view)
 
 
@@ -1333,6 +1359,16 @@ async def music_albums(
     request: Request,
     libraryId: str | None = Query(None),
     language: str | None = Query(None),
+    genre: list[str] = Query(default=[]),
+    officialRating: list[str] = Query(default=[]),
+    yearFrom: int | None = Query(None),
+    yearTo: int | None = Query(None),
+    watchState: str | None = Query(None),
+    favoritesOnly: bool = Query(False),
+    artist: list[str] = Query(default=[]),
+    albumArtist: list[str] = Query(default=[]),
+    albumType: list[str] = Query(default=[]),
+    includeFilterOptions: bool = Query(False),
     page: int = Query(1, ge=1),
     pageSize: int = Query(40, ge=1, le=100),
     sortBy: str | None = Query(None),
@@ -1352,7 +1388,24 @@ async def music_albums(
         page_size=effective_page_size,
         sort_by=sortBy,
         sort_order=sortOrder,
+        genres=genre,
+        official_ratings=officialRating,
+        year_from=yearFrom,
+        year_to=yearTo,
+        watch_state=watchState,
+        favorites_only=favoritesOnly,
+        artists=artist,
+        album_artists=albumArtist,
+        album_types=albumType,
     )
+    if includeFilterOptions:
+        result["filterOptions"] = await run_foreground(
+            catalog.library_filter_options,
+            account["id"],
+            preferred,
+            libraryId,
+            music_albums=True,
+        )
     return _catalog_response(result, view)
 
 

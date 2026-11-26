@@ -671,6 +671,14 @@ class CatalogItem(DocsModel):
     childIds: list[str] = Field(default_factory=list)
 
 
+class CatalogFilterOptions(DocsModel):
+    genres: list[str] = Field(default_factory=list)
+    officialRatings: list[str] = Field(default_factory=list)
+    artists: list[str] = Field(default_factory=list)
+    albumArtists: list[str] = Field(default_factory=list)
+    albumTypes: list[str] = Field(default_factory=list)
+
+
 class CatalogPage(DocsModel):
     items: list[CatalogItem] = Field(default_factory=list)
     page: int | None = Field(default=None, examples=[1])
@@ -681,6 +689,7 @@ class CatalogPage(DocsModel):
     facets: dict[str, int] = Field(
         default_factory=dict, examples=[{"all": 1, "movie": 1}]
     )
+    filterOptions: CatalogFilterOptions | None = None
     libraryRows: list[Any] = Field(default_factory=list)
     sections: list[Any] = Field(default_factory=list)
 

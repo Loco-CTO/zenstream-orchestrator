@@ -74,6 +74,146 @@ def _empty_search_page(page: int, page_size: int) -> dict:
     }
 
 
+def _catalog_filter_keys(
+    genres: list[str] | None,
+    official_ratings: list[str] | None,
+) -> tuple[list[str], list[str]]:
+    genre_keys = sorted(
+        {
+            normalize_search_text(value)
+            for value in (genres or [])
+            if isinstance(value, str) and value.strip()
+        }
+    )
+    rating_keys = sorted(
+        {
+            value.strip().casefold()
+            for value in (official_ratings or [])
+            if isinstance(value, str) and value.strip()
+        }
+    )
+    if len(genre_keys) > 20 or len(rating_keys) > 20:
+        raise HTTPException(400, "Too many catalog filters.")
+    return genre_keys, rating_keys
+
+
+def _catalog_named_filter_keys(values: list[str] | None) -> list[str]:
+    keys = sorted(
+        {
+            value.strip().casefold()
+            for value in (values or [])
+            if isinstance(value, str) and value.strip()
+        }
+    )
+    if len(keys) > 20:
+        raise HTTPException(400, "Too many catalog filters.")
+    return keys
+
+
+def _catalog_year_range(
+    year_from: int | None,
+    year_to: int | None,
+) -> tuple[int | None, int | None]:
+    if year_from is not None and year_to is not None and year_from > year_to:
+        return year_to, year_from
+    return year_from, year_to
+
+
+def _catalog_watch_state(value: str | None) -> str | None:
+    normalized = value.strip().casefold() if isinstance(value, str) else ""
+    if not normalized:
+        return None
+    if normalized not in {"watched", "unwatched"}:
+        raise HTTPException(400, "watchState must be watched or unwatched.")
+    return normalized
+
+
+def _catalog_metadata_matches(
+    metadata: dict,
+    genre_keys: list[str],
+    rating_keys: list[str],
+    *,
+    year_from: int | None = None,
+    year_to: int | None = None,
+    watch_state: str | None = None,
+    favorites_only: bool = False,
+    user_state: dict | None = None,
+    artist_keys: list[str] | None = None,
+    album_artist_keys: list[str] | None = None,
+    album_type_keys: list[str] | None = None,
+) -> bool:
+    if genre_keys:
+        values = metadata.get("genres") or metadata.get("tags") or []
+        item_genres = {
+            normalize_search_text(value)
+            for value in values
+            if isinstance(value, str) and value.strip()
+        }
+        if not item_genres.intersection(genre_keys):
+            return False
+    if rating_keys:
+        rating = str(metadata.get("officialRating") or "").strip().casefold()
+        if rating not in rating_keys:
+            return False
+    if year_from is not None or year_to is not None:
+        raw_year = metadata.get("year") or metadata.get("productionYear")
+        if not raw_year:
+            raw_year = (
+                metadata.get("releaseDate")
+                or metadata.get("premiereDate")
+                or metadata.get("date")
+            )
+        try:
+            item_year = int(str(raw_year)[:4])
+        except (TypeError, ValueError):
+            return False
+        if year_from is not None and item_year < year_from:
+            return False
+        if year_to is not None and item_year > year_to:
+            return False
+    state = user_state or {}
+    if favorites_only and not state.get("favorite"):
+        return False
+    if watch_state == "watched" and not state.get("played"):
+        return False
+    if watch_state == "unwatched" and state.get("played"):
+        return False
+    if artist_keys:
+        artist_names = set()
+        for field in ("artists", "contributingArtists"):
+            values = metadata.get(field) or []
+            if not isinstance(values, list):
+                values = [values]
+            for value in values:
+                name = value.get("name") if isinstance(value, dict) else value
+                if isinstance(name, str) and name.strip():
+                    artist_names.add(name.strip().casefold())
+        album_artist = metadata.get("albumArtist")
+        if isinstance(album_artist, str) and album_artist.strip():
+            artist_names.add(album_artist.strip().casefold())
+        if not artist_names.intersection(artist_keys):
+            return False
+    if album_artist_keys:
+        album_artist = str(metadata.get("albumArtist") or "").strip().casefold()
+        if album_artist not in album_artist_keys:
+            return False
+    if album_type_keys:
+        album_types = set()
+        for field in ("albumType", "albumSecondaryTypes"):
+            values = metadata.get(field) or []
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                album_types.update(
+                    value.strip().casefold()
+                    for value in values
+                    if isinstance(value, str) and value.strip()
+                )
+        if not album_types.intersection(album_type_keys):
+            return False
+    return True
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1781,6 +1921,16 @@ class Catalog:
         page_size: int,
         sort_by: str | None,
         sort_order: str,
+        genre_keys: list[str],
+        rating_keys: list[str],
+        genre_values: list[str],
+        year_from: int | None,
+        year_to: int | None,
+        watch_state: str | None,
+        favorites_only: bool,
+        artist_keys: list[str],
+        album_artist_keys: list[str],
+        album_type_keys: list[str],
     ) -> dict:
         allowed = sorted(self.allowed_libraries(user_id))
         empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
@@ -1820,6 +1970,20 @@ class Catalog:
         where_clause = (
             f"WHERE m.collection_entity_id=? AND p.library_id IN ({placeholders})"
         )
+        filter_clause, filter_params = self._catalog_filter_clause(
+            genre_keys,
+            rating_keys,
+            user_id=user_id,
+            genre_values=genre_values,
+            year_from=year_from,
+            year_to=year_to,
+            watch_state=watch_state,
+            favorites_only=favorites_only,
+            artist_keys=artist_keys,
+            album_artist_keys=album_artist_keys,
+            album_type_keys=album_type_keys,
+        )
+        where_clause += filter_clause
 
         def read_rows(member_table: str):
             total_rows = self.db.execute(
@@ -1827,7 +1991,7 @@ class Catalog:
                 + from_clause.format(member_table=member_table)
                 + " "
                 + where_clause,
-                [language, collection_id, *allowed],
+                [language, collection_id, *allowed, *filter_params],
             )
             total = int(total_rows[0][0] or 0) if total_rows else 0
             offset = max(0, page - 1) * page_size
@@ -1838,7 +2002,7 @@ class Catalog:
                 + " "
                 + where_clause
                 + f" ORDER BY {order} LIMIT ? OFFSET ?",
-                [language, collection_id, *allowed, page_size, offset],
+                [language, collection_id, *allowed, *filter_params, page_size, offset],
             )
             return total, rows
 
@@ -1876,30 +2040,450 @@ class Catalog:
         *,
         page: int,
         page_size: int,
+        genre_keys: list[str],
+        rating_keys: list[str],
+        year_from: int | None,
+        year_to: int | None,
+        watch_state: str | None,
+        favorites_only: bool,
+        artist_keys: list[str],
+        album_artist_keys: list[str],
+        album_type_keys: list[str],
     ) -> dict:
         allowed = sorted(self.allowed_libraries(user_id))
         empty = {"items": [], "page": page, "pageSize": page_size, "total": 0}
         if not allowed or not self._has_table("collection_members"):
             return empty
         placeholders = ",".join("?" for _ in allowed)
-        total_rows = self.db.execute(
-            "SELECT COUNT(*) FROM collection_members m "
-            "JOIN library_entities e ON e.id=m.source_entity_id "
-            f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders})",
-            [collection_id, *allowed],
-        )
-        total = int(total_rows[0][0] or 0) if total_rows else 0
-        offset = max(0, page - 1) * page_size
         rows = self.db.execute(
             "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
             "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
             "FROM collection_members m JOIN library_entities e ON e.id=m.source_entity_id "
             f"WHERE m.collection_entity_id=? AND e.library_id IN ({placeholders}) "
-            "ORDER BY m.position ASC,e.id ASC LIMIT ? OFFSET ?",
-            [collection_id, *allowed, page_size, offset],
+            "ORDER BY m.position ASC,e.id ASC",
+            [collection_id, *allowed],
         )
         values = self._hydrate_rows(user_id, [row[:10] for row in rows], language)
-        return {"items": values, "page": page, "pageSize": page_size, "total": total}
+        if (
+            genre_keys
+            or rating_keys
+            or year_from is not None
+            or year_to is not None
+            or watch_state
+            or favorites_only
+            or artist_keys
+            or album_artist_keys
+            or album_type_keys
+        ):
+            values = [
+                value
+                for value in values
+                if _catalog_metadata_matches(
+                    value.get("metadata") or {},
+                    genre_keys,
+                    rating_keys,
+                    year_from=year_from,
+                    year_to=year_to,
+                    watch_state=watch_state,
+                    favorites_only=favorites_only,
+                    user_state=value.get("userState"),
+                    artist_keys=artist_keys,
+                    album_artist_keys=album_artist_keys,
+                    album_type_keys=album_type_keys,
+                )
+            ]
+        total = len(values)
+        offset = max(0, page - 1) * page_size
+        return {
+            "items": values[offset : offset + page_size],
+            "page": page,
+            "pageSize": page_size,
+            "total": total,
+        }
+
+    def _catalog_filter_clause(
+        self,
+        genre_keys: list[str],
+        rating_keys: list[str],
+        *,
+        user_id: str,
+        projection_alias: str = "p",
+        genre_values: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        watch_state: str | None = None,
+        favorites_only: bool = False,
+        artist_keys: list[str] | None = None,
+        album_artist_keys: list[str] | None = None,
+        album_type_keys: list[str] | None = None,
+    ) -> tuple[str, list[object]]:
+        clauses = []
+        params: list[object] = []
+        if genre_keys:
+            if self._has_table("catalog_item_genres"):
+                placeholders = ",".join("?" for _ in genre_keys)
+                clauses.append(
+                    "EXISTS (SELECT 1 FROM catalog_item_genres genre_filter "
+                    f"WHERE genre_filter.entity_id={projection_alias}.entity_id "
+                    f"AND genre_filter.locale={projection_alias}.locale "
+                    f"AND genre_filter.genre_key IN ({placeholders}))"
+                )
+                params.extend(genre_keys)
+            else:
+                values = [
+                    value.strip().casefold()
+                    for value in (genre_values or [])
+                    if value.strip()
+                ]
+                if values:
+                    placeholders = ",".join("?" for _ in values)
+                    clauses.append(
+                        "EXISTS (SELECT 1 FROM json_each(COALESCE("
+                        f"json_extract({projection_alias}.payload,'$.genres'),"
+                        f"json_extract({projection_alias}.payload,'$.tags'),'[]')) genre_filter "
+                        "WHERE lower(trim(CAST(genre_filter.value AS TEXT))) "
+                        f"IN ({placeholders}))"
+                    )
+                    params.extend(values)
+        if rating_keys:
+            placeholders = ",".join("?" for _ in rating_keys)
+            clauses.append(
+                f"lower(trim(json_extract({projection_alias}.payload,'$.officialRating'))) "
+                f"IN ({placeholders})"
+            )
+            params.extend(rating_keys)
+        if year_from is not None or year_to is not None:
+            year_expression = (
+                "COALESCE("
+                f"NULLIF(CAST(json_extract({projection_alias}.payload,'$.year') AS INTEGER),0),"
+                f"NULLIF(CAST(json_extract({projection_alias}.payload,'$.productionYear') AS INTEGER),0),"
+                f"NULLIF(CAST(substr(COALESCE(json_extract({projection_alias}.payload,'$.releaseDate'),"
+                f"json_extract({projection_alias}.payload,'$.premiereDate'),"
+                f"json_extract({projection_alias}.payload,'$.date')),1,4) AS INTEGER),0))"
+            )
+            if year_from is not None:
+                clauses.append(f"{year_expression} >= ?")
+                params.append(year_from)
+            if year_to is not None:
+                clauses.append(f"{year_expression} <= ?")
+                params.append(year_to)
+        if favorites_only:
+            clauses.append(
+                "EXISTS (SELECT 1 FROM user_item_state favorite_filter "
+                f"WHERE favorite_filter.user_id=? AND favorite_filter.entity_id={projection_alias}.entity_id "
+                "AND favorite_filter.favorite=1)"
+            )
+            params.append(user_id)
+        if watch_state in {"watched", "unwatched"}:
+            if (
+                self._read_model_ready()
+                and self._has_table("catalog_user_summary")
+                and self._has_table("catalog_entity_summary")
+            ):
+                played_predicate = (
+                    "EXISTS (SELECT 1 FROM catalog_user_summary watch_filter "
+                    "JOIN catalog_entity_summary entity_filter "
+                    "ON entity_filter.entity_id=watch_filter.entity_id "
+                    f"WHERE watch_filter.user_id=? AND watch_filter.entity_id={projection_alias}.entity_id "
+                    "AND entity_filter.playable_leaf_count>0 "
+                    "AND watch_filter.played_leaf_count=entity_filter.playable_leaf_count)"
+                )
+            else:
+                played_predicate = (
+                    "EXISTS (SELECT 1 FROM user_item_state watch_filter "
+                    f"WHERE watch_filter.user_id=? AND watch_filter.entity_id={projection_alias}.entity_id "
+                    "AND watch_filter.played=1)"
+                )
+            params.append(user_id)
+            clauses.append(
+                played_predicate
+                if watch_state == "watched"
+                else f"NOT ({played_predicate})"
+            )
+        if artist_keys:
+            placeholders = ",".join("?" for _ in artist_keys)
+            artist_values = (
+                "SELECT CASE WHEN artist_filter.type='object' "
+                "THEN json_extract(artist_filter.value,'$.name') "
+                "ELSE artist_filter.value END AS name "
+                f"FROM json_each(COALESCE(json_extract({projection_alias}.payload,'$.artists'),'[]')) artist_filter "
+                "UNION ALL "
+                "SELECT CASE WHEN contributing_filter.type='object' "
+                "THEN json_extract(contributing_filter.value,'$.name') "
+                "ELSE contributing_filter.value END AS name "
+                f"FROM json_each(COALESCE(json_extract({projection_alias}.payload,'$.contributingArtists'),'[]')) contributing_filter "
+                "UNION ALL "
+                f"SELECT json_extract({projection_alias}.payload,'$.albumArtist')"
+            )
+            clauses.append(
+                "EXISTS (SELECT 1 FROM ("
+                + artist_values
+                + ") music_artist_filter WHERE lower(trim(music_artist_filter.name)) "
+                + f"IN ({placeholders}))"
+            )
+            params.extend(artist_keys)
+        if album_artist_keys:
+            placeholders = ",".join("?" for _ in album_artist_keys)
+            clauses.append(
+                f"lower(trim(json_extract({projection_alias}.payload,'$.albumArtist'))) "
+                f"IN ({placeholders})"
+            )
+            params.extend(album_artist_keys)
+        if album_type_keys:
+            placeholders = ",".join("?" for _ in album_type_keys)
+            clauses.append(
+                "(lower(trim(json_extract("
+                f"{projection_alias}.payload,'$.albumType'))) IN ({placeholders}) OR "
+                "EXISTS (SELECT 1 FROM json_each(COALESCE("
+                f"json_extract({projection_alias}.payload,'$.albumSecondaryTypes'),'[]')) album_type_filter "
+                f"WHERE lower(trim(CAST(album_type_filter.value AS TEXT))) IN ({placeholders})))"
+            )
+            params.extend(album_type_keys)
+            params.extend(album_type_keys)
+        return "".join(f" AND ({clause})" for clause in clauses), params
+
+    @_catalog_read
+    def library_filter_options(
+        self,
+        user_id: str,
+        language: str,
+        library_id: str | None = None,
+        *,
+        music_albums: bool = False,
+    ) -> dict:
+        if library_id is not None:
+            library = self.require_library(user_id, library_id)
+            if music_albums and library["type"] != "music":
+                raise HTTPException(404, "Music library not found.")
+            allowed = {library_id}
+        else:
+            allowed = {
+                library["id"]
+                for library in self.libraries(user_id)
+                if not music_albums or library["type"] == "music"
+            }
+        if not allowed:
+            return {
+                "genres": [],
+                "officialRatings": [],
+                "artists": [],
+                "albumArtists": [],
+                "albumTypes": [],
+            }
+
+        locale = normalize_metadata_locale(language)
+        library_ids = sorted(allowed)
+        placeholders = ",".join("?" for _ in library_ids)
+        genre_rows = []
+        rating_rows = []
+        artist_rows = []
+        album_artist_rows = []
+        album_type_rows = []
+        can_read_projection = (
+            self._read_model_ready()
+            and self._has_table("catalog_item_projection")
+        )
+        has_music_page = (
+            music_albums and self._has_table("catalog_music_album_page")
+        )
+        if can_read_projection and (not music_albums or has_music_page):
+            if has_music_page:
+                genre_params = [locale, *library_ids]
+                if self._has_table("catalog_item_genres"):
+                    genre_rows = self.db.execute(
+                        "SELECT DISTINCT g.genre_key,g.genre_name "
+                        "FROM catalog_item_genres g "
+                        "JOIN catalog_music_album_page album_page "
+                        "ON album_page.release_id=g.entity_id AND album_page.locale=g.locale "
+                        f"WHERE album_page.locale=? AND album_page.library_id IN ({placeholders})",
+                        genre_params,
+                    )
+                else:
+                    genre_rows = self.db.execute(
+                        "SELECT DISTINCT json_each.key,json_each.value "
+                        "FROM catalog_music_album_page album_page "
+                        "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                        "AND p.locale=album_page.locale "
+                        "JOIN json_each(COALESCE(json_extract(p.payload,'$.genres'),"
+                        "json_extract(p.payload,'$.tags'),'[]')) json_each "
+                        f"WHERE album_page.locale=? AND album_page.library_id IN ({placeholders})",
+                        genre_params,
+                    )
+                rating_rows = self.db.execute(
+                    "SELECT DISTINCT trim(json_extract(p.payload,'$.officialRating')) "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    f"WHERE album_page.locale=? AND album_page.library_id IN ({placeholders}) "
+                    "AND trim(COALESCE(json_extract(p.payload,'$.officialRating'),''))<>''",
+                    genre_params,
+                )
+                artist_rows = self.db.execute(
+                    "SELECT DISTINCT trim(music_artist.name) FROM ("
+                    "SELECT CASE WHEN artist_filter.type='object' "
+                    "THEN json_extract(artist_filter.value,'$.name') "
+                    "ELSE artist_filter.value END AS name "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    "JOIN json_each(COALESCE(json_extract(p.payload,'$.artists'),'[]')) artist_filter "
+                    "WHERE album_page.locale=? AND album_page.library_id IN ("
+                    + placeholders
+                    + ") UNION ALL SELECT CASE WHEN contributing_filter.type='object' "
+                    "THEN json_extract(contributing_filter.value,'$.name') "
+                    "ELSE contributing_filter.value END AS name "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    "JOIN json_each(COALESCE(json_extract(p.payload,'$.contributingArtists'),'[]')) contributing_filter "
+                    "WHERE album_page.locale=? AND album_page.library_id IN ("
+                    + placeholders
+                    + ") UNION ALL SELECT json_extract(p.payload,'$.albumArtist') "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    "WHERE album_page.locale=? AND album_page.library_id IN ("
+                    + placeholders
+                    + ")) music_artist WHERE COALESCE(trim(music_artist.name),'')<>''",
+                    [*genre_params, *genre_params, *genre_params],
+                )
+                album_artist_rows = self.db.execute(
+                    "SELECT DISTINCT trim(json_extract(p.payload,'$.albumArtist')) "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    f"WHERE album_page.locale=? AND album_page.library_id IN ({placeholders}) "
+                    "AND trim(COALESCE(json_extract(p.payload,'$.albumArtist'),''))<>''",
+                    genre_params,
+                )
+                album_type_rows = self.db.execute(
+                    "SELECT DISTINCT trim(music_type.value) FROM ("
+                    "SELECT json_extract(p.payload,'$.albumType') AS value "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    "WHERE album_page.locale=? AND album_page.library_id IN ("
+                    + placeholders
+                    + ") UNION ALL SELECT album_type.value "
+                    "FROM catalog_music_album_page album_page "
+                    "JOIN catalog_item_projection p ON p.entity_id=album_page.release_id "
+                    "AND p.locale=album_page.locale "
+                    "JOIN json_each(COALESCE(json_extract(p.payload,'$.albumSecondaryTypes'),'[]')) album_type "
+                    "WHERE album_page.locale=? AND album_page.library_id IN ("
+                    + placeholders
+                    + ")) music_type WHERE COALESCE(trim(music_type.value),'')<>''",
+                    [*genre_params, *genre_params],
+                )
+            else:
+                base_params = [locale, *library_ids]
+                if self._has_table("catalog_item_genres"):
+                    genre_rows = self.db.execute(
+                        "SELECT DISTINCT g.genre_key,g.genre_name "
+                        "FROM catalog_item_genres g "
+                        "JOIN catalog_item_projection p ON p.entity_id=g.entity_id "
+                        "AND p.locale=g.locale "
+                        f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
+                        "AND p.parent_id IS NULL",
+                        base_params,
+                    )
+                else:
+                    genre_rows = self.db.execute(
+                        "SELECT DISTINCT json_each.key,json_each.value "
+                        "FROM catalog_item_projection p "
+                        "JOIN json_each(COALESCE(json_extract(p.payload,'$.genres'),"
+                        "json_extract(p.payload,'$.tags'),'[]')) json_each "
+                        f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
+                        "AND p.parent_id IS NULL",
+                        base_params,
+                    )
+                rating_rows = self.db.execute(
+                    "SELECT DISTINCT trim(json_extract(p.payload,'$.officialRating')) "
+                    "FROM catalog_item_projection p "
+                    f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
+                    "AND p.parent_id IS NULL "
+                    "AND trim(COALESCE(json_extract(p.payload,'$.officialRating'),''))<>''",
+                    base_params,
+                )
+        else:
+            if music_albums:
+                rows = self._music_release_rows(allowed)
+            else:
+                rows = self.db.execute(
+                    "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,"
+                    "episode_number,episode_end_number,created_at,updated_at "
+                    "FROM library_entities WHERE library_id IN ("
+                    + placeholders
+                    + ") AND parent_id IS NULL",
+                    library_ids,
+                )
+            for row in rows:
+                metadata = self.metadata(user_id, row[0], language)["metadata"]
+                genres = metadata.get("genres") or metadata.get("tags") or []
+                genre_rows.extend(
+                    (normalize_search_text(value), value.strip())
+                    for value in genres
+                    if isinstance(value, str) and value.strip()
+                )
+                rating = str(metadata.get("officialRating") or "").strip()
+                if rating:
+                    rating_rows.append((rating,))
+                for field in ("artists", "contributingArtists"):
+                    values = metadata.get(field) or []
+                    if not isinstance(values, list):
+                        values = [values]
+                    for value in values:
+                        name = value.get("name") if isinstance(value, dict) else value
+                        if isinstance(name, str) and name.strip():
+                            artist_rows.append((name.strip(),))
+                album_artist = metadata.get("albumArtist")
+                if isinstance(album_artist, str) and album_artist.strip():
+                    artist_rows.append((album_artist.strip(),))
+                    album_artist_rows.append((album_artist.strip(),))
+                album_types = metadata.get("albumSecondaryTypes") or []
+                if isinstance(album_types, str):
+                    album_types = [album_types]
+                album_type = metadata.get("albumType")
+                if isinstance(album_type, str) and album_type.strip():
+                    album_type_rows.append((album_type.strip(),))
+                album_type_rows.extend(
+                    (value.strip(),)
+                    for value in album_types
+                    if isinstance(value, str) and value.strip()
+                )
+
+        genres_by_key: dict[str, str] = {}
+        for key, name in genre_rows:
+            label = str(name or "").strip()
+            normalized = normalize_search_text(label)
+            if label and normalized:
+                genres_by_key.setdefault(normalized, label)
+        ratings_by_key: dict[str, str] = {}
+        for (value,) in rating_rows:
+            label = str(value or "").strip()
+            if label:
+                ratings_by_key.setdefault(label.casefold(), label)
+        artists_by_key: dict[str, str] = {}
+        for (value,) in artist_rows:
+            label = str(value or "").strip()
+            if label:
+                artists_by_key.setdefault(label.casefold(), label)
+        album_artists_by_key: dict[str, str] = {}
+        for (value,) in album_artist_rows:
+            label = str(value or "").strip()
+            if label:
+                album_artists_by_key.setdefault(label.casefold(), label)
+        album_types_by_key: dict[str, str] = {}
+        for (value,) in album_type_rows:
+            label = str(value or "").strip()
+            if label:
+                album_types_by_key.setdefault(label.casefold(), label)
+        return {
+            "genres": sorted(genres_by_key.values(), key=str.casefold),
+            "officialRatings": sorted(ratings_by_key.values(), key=str.casefold),
+            "artists": sorted(artists_by_key.values(), key=str.casefold),
+            "albumArtists": sorted(album_artists_by_key.values(), key=str.casefold),
+            "albumTypes": sorted(album_types_by_key.values(), key=str.casefold),
+        }
 
     def _list_items_read_model(
         self,
@@ -1912,12 +2496,46 @@ class Catalog:
         page_size: int,
         sort_by: str | None,
         sort_order: str,
+        genre_keys: list[str],
+        rating_keys: list[str],
+        genre_values: list[str],
+        year_from: int | None,
+        year_to: int | None,
+        watch_state: str | None,
+        favorites_only: bool,
+        artist_keys: list[str],
+        album_artist_keys: list[str],
+        album_type_keys: list[str],
     ) -> dict:
         library_id = library["id"]
         offset = max(0, page - 1) * page_size
+        filter_clause, filter_params = self._catalog_filter_clause(
+            genre_keys,
+            rating_keys,
+            user_id=user_id,
+            genre_values=genre_values,
+            year_from=year_from,
+            year_to=year_to,
+            watch_state=watch_state,
+            favorites_only=favorites_only,
+            artist_keys=artist_keys,
+            album_artist_keys=album_artist_keys,
+            album_type_keys=album_type_keys,
+        )
+        where_clause = (
+            "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ?"
+            + filter_clause
+        )
+        base_params: list[object] = [
+            language,
+            library_id,
+            parent_id,
+            *filter_params,
+        ]
         count_rows = self.db.execute(
-            "SELECT COUNT(*) FROM catalog_item_projection WHERE locale=? AND library_id=? AND parent_id IS ?",
-            (language, library_id, parent_id),
+            "SELECT COUNT(*) FROM catalog_item_projection p "
+            + where_clause,
+            base_params,
         )
         total = int(count_rows[0][0] or 0) if count_rows else 0
         direction = "DESC" if sort_order.lower() == "descending" else "ASC"
@@ -1947,7 +2565,8 @@ class Catalog:
                 "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
                 "LEFT JOIN catalog_entity_summary s ON s.entity_id=e.id "
                 "AND s.library_id=p.library_id AND s.parent_id IS p.parent_id "
-                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY "
+                + where_clause
+                + " ORDER BY "
                 + order
                 + " LIMIT ? OFFSET ?"
             )
@@ -1974,12 +2593,20 @@ class Catalog:
                     language,
                     library_id,
                     parent_id,
+                    *filter_params,
                     *scope,
                     page_size,
                     offset,
                 ]
             else:
-                params = [language, library_id, parent_id, page_size, offset]
+                params = [
+                    language,
+                    library_id,
+                    parent_id,
+                    *filter_params,
+                    page_size,
+                    offset,
+                ]
         elif sort_by in {"rating", "title", "release", "runtime"} or sort_by is None:
             projection_order = {
                 "rating": "p.rating_sort",
@@ -2014,21 +2641,23 @@ class Catalog:
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
                 "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
-                "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ? ORDER BY "
+                + where_clause
+                + " ORDER BY "
                 + projection_order
                 + ",p.entity_id "
                 + projection_tie_direction
                 + " LIMIT ? OFFSET ?"
             )
-            params.extend([page_size, offset])
+            params = [*base_params, page_size, offset]
         else:
             query = (
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,e.season_number,"
                 "e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-                "FROM library_entities e WHERE e.library_id=? AND e.parent_id IS ? "
-                "ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT ? OFFSET ?"
+                "FROM catalog_item_projection p JOIN library_entities e ON e.id=p.entity_id "
+                + where_clause
+                + " ORDER BY e.relative_path COLLATE NOCASE,e.id LIMIT ? OFFSET ?"
             )
-            params = [library_id, parent_id, page_size, offset]
+            params = [*base_params, page_size, offset]
         rows = self.db.execute(query, params)
         dates: dict[str, dict] = {}
         ids = [row[0] for row in rows]
@@ -2746,6 +3375,16 @@ class Catalog:
         page_size: int,
         sort_by: str | None,
         sort_order: str,
+        genre_keys: list[str],
+        rating_keys: list[str],
+        genre_values: list[str],
+        year_from: int | None,
+        year_to: int | None,
+        watch_state: str | None,
+        favorites_only: bool,
+        artist_keys: list[str],
+        album_artist_keys: list[str],
+        album_type_keys: list[str],
     ) -> dict:
         placeholders = ",".join("?" for _ in library_ids)
         count_rows = self.db.execute(
@@ -2771,6 +3410,33 @@ class Catalog:
             if locale_rows:
                 page_language = str(locale_rows[0][0])
                 total = int(locale_rows[0][1] or 0)
+        filter_clause, filter_params = self._catalog_filter_clause(
+            genre_keys,
+            rating_keys,
+            user_id=user_id,
+            projection_alias="projection",
+            genre_values=genre_values,
+            year_from=year_from,
+            year_to=year_to,
+            watch_state=watch_state,
+            favorites_only=favorites_only,
+            artist_keys=artist_keys,
+            album_artist_keys=album_artist_keys,
+            album_type_keys=album_type_keys,
+        )
+        if filter_clause:
+            filtered_count_rows = self.db.execute(
+                "SELECT COUNT(*) FROM catalog_music_album_page album_page "
+                "JOIN catalog_item_projection projection "
+                "ON projection.entity_id=album_page.release_id "
+                "AND projection.locale=album_page.locale "
+                f"WHERE album_page.locale=? AND album_page.library_id IN ({placeholders})"
+                + filter_clause,
+                [page_language, *sorted(library_ids), *filter_params],
+            )
+            total = (
+                int(filtered_count_rows[0][0] or 0) if filtered_count_rows else 0
+            )
         direction = "DESC" if sort_order.casefold() == "descending" else "ASC"
         sort_key = str(sort_by or "title").casefold()
         order_column = (
@@ -2781,14 +3447,24 @@ class Catalog:
             else "title_sort"
         )
         offset = max(0, page - 1) * page_size
+        projection_join = (
+            " JOIN catalog_item_projection projection "
+            "ON projection.entity_id=album_page.release_id "
+            "AND projection.locale=album_page.locale"
+            if filter_clause
+            else ""
+        )
         rows = self.db.execute(
             "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
             "e.season_number,e.episode_number,e.episode_end_number,e.created_at,e.updated_at "
-            "FROM catalog_music_album_page p JOIN library_entities e ON e.id=p.release_id "
-            f"WHERE p.locale=? AND p.library_id IN ({placeholders}) "
-            f"ORDER BY p.{order_column} {direction},p.title_sort {direction},p.release_id {direction} "
-            "LIMIT ? OFFSET ?",
-            [page_language, *sorted(library_ids), page_size, offset],
+            "FROM catalog_music_album_page album_page "
+            "JOIN library_entities e ON e.id=album_page.release_id"
+            + projection_join
+            + f" WHERE album_page.locale=? AND album_page.library_id IN ({placeholders})"
+            + filter_clause
+            + f" ORDER BY album_page.{order_column} {direction},album_page.title_sort {direction},album_page.release_id {direction} "
+            + "LIMIT ? OFFSET ?",
+            [page_language, *sorted(library_ids), *filter_params, page_size, offset],
         )
         if not rows:
             return {"items": [], "page": page, "pageSize": page_size, "total": total}
@@ -2882,7 +3558,27 @@ class Catalog:
         page_size: int = 40,
         sort_by: str | None = None,
         sort_order: str = "ascending",
+        genres: list[str] | None = None,
+        official_ratings: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        watch_state: str | None = None,
+        favorites_only: bool = False,
+        artists: list[str] | None = None,
+        album_artists: list[str] | None = None,
+        album_types: list[str] | None = None,
     ) -> dict:
+        genre_keys, rating_keys = _catalog_filter_keys(genres, official_ratings)
+        year_from, year_to = _catalog_year_range(year_from, year_to)
+        watch_state = _catalog_watch_state(watch_state)
+        artist_keys = _catalog_named_filter_keys(artists)
+        album_artist_keys = _catalog_named_filter_keys(album_artists)
+        album_type_keys = _catalog_named_filter_keys(album_types)
+        genre_values = [
+            value.strip()
+            for value in (genres or [])
+            if isinstance(value, str) and value.strip()
+        ]
         if library_id is not None:
             library = self.require_library(user_id, library_id)
             if library["type"] != "music":
@@ -2911,6 +3607,16 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                genre_keys=genre_keys,
+                rating_keys=rating_keys,
+                genre_values=genre_values,
+                year_from=year_from,
+                year_to=year_to,
+                watch_state=watch_state,
+                favorites_only=favorites_only,
+                artist_keys=artist_keys,
+                album_artist_keys=album_artist_keys,
+                album_type_keys=album_type_keys,
             )
         if self._music_album_page_ready(allowed, language):
             return self._music_album_page(
@@ -2921,6 +3627,16 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                genre_keys=genre_keys,
+                rating_keys=rating_keys,
+                genre_values=genre_values,
+                year_from=year_from,
+                year_to=year_to,
+                watch_state=watch_state,
+                favorites_only=favorites_only,
+                artist_keys=artist_keys,
+                album_artist_keys=album_artist_keys,
+                album_type_keys=album_type_keys,
             )
         rows = self._music_release_rows(allowed)
         row_by_id = {row[0]: row for row in rows}
@@ -2948,6 +3664,34 @@ class Catalog:
             )
             for row in rows
         ]
+        if (
+            genre_keys
+            or rating_keys
+            or year_from is not None
+            or year_to is not None
+            or watch_state
+            or favorites_only
+            or artist_keys
+            or album_artist_keys
+            or album_type_keys
+        ):
+            values = [
+                value
+                for value in values
+                if _catalog_metadata_matches(
+                    value.get("metadata") or {},
+                    genre_keys,
+                    rating_keys,
+                    year_from=year_from,
+                    year_to=year_to,
+                    watch_state=watch_state,
+                    favorites_only=favorites_only,
+                    user_state=value.get("userState"),
+                    artist_keys=artist_keys,
+                    album_artist_keys=album_artist_keys,
+                    album_type_keys=album_type_keys,
+                )
+            ]
         sort_key = str(sort_by or "title").casefold()
         if sort_key in {"year", "release", "date"}:
             key = lambda value: (
@@ -3374,7 +4118,27 @@ class Catalog:
         page_size: int = 40,
         sort_by: str | None = None,
         sort_order: str = "ascending",
+        genres: list[str] | None = None,
+        official_ratings: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        watch_state: str | None = None,
+        favorites_only: bool = False,
+        artists: list[str] | None = None,
+        album_artists: list[str] | None = None,
+        album_types: list[str] | None = None,
     ) -> dict:
+        genre_keys, rating_keys = _catalog_filter_keys(genres, official_ratings)
+        year_from, year_to = _catalog_year_range(year_from, year_to)
+        watch_state = _catalog_watch_state(watch_state)
+        artist_keys = _catalog_named_filter_keys(artists)
+        album_artist_keys = _catalog_named_filter_keys(album_artists)
+        album_type_keys = _catalog_named_filter_keys(album_types)
+        genre_values = [
+            value.strip()
+            for value in (genres or [])
+            if isinstance(value, str) and value.strip()
+        ]
         library = self.require_library(user_id, library_id)
         if parent_id:
             parent = self.require_entity(user_id, parent_id)
@@ -3389,6 +4153,15 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                genres=genre_values,
+                official_ratings=official_ratings,
+                year_from=year_from,
+                year_to=year_to,
+                watch_state=watch_state,
+                favorites_only=favorites_only,
+                artists=artists,
+                album_artists=album_artists,
+                album_types=album_types,
             )
         if self._read_model_ready():
             if library["type"] == "collection" and parent_id:
@@ -3400,6 +4173,16 @@ class Catalog:
                     page_size=page_size,
                     sort_by=sort_by,
                     sort_order=sort_order,
+                    genre_keys=genre_keys,
+                    rating_keys=rating_keys,
+                    genre_values=genre_values,
+                    year_from=year_from,
+                    year_to=year_to,
+                    watch_state=watch_state,
+                    favorites_only=favorites_only,
+                    artist_keys=artist_keys,
+                    album_artist_keys=album_artist_keys,
+                    album_type_keys=album_type_keys,
                 )
             return self._list_items_read_model(
                 user_id,
@@ -3410,6 +4193,16 @@ class Catalog:
                 page_size=page_size,
                 sort_by=sort_by,
                 sort_order=sort_order,
+                genre_keys=genre_keys,
+                rating_keys=rating_keys,
+                genre_values=genre_values,
+                year_from=year_from,
+                year_to=year_to,
+                watch_state=watch_state,
+                favorites_only=favorites_only,
+                artist_keys=artist_keys,
+                album_artist_keys=album_artist_keys,
+                album_type_keys=album_type_keys,
             )
         if library["type"] == "collection" and parent_id:
             return self._list_collection_members_legacy(
@@ -3418,11 +4211,48 @@ class Catalog:
                 language,
                 page=page,
                 page_size=page_size,
+                genre_keys=genre_keys,
+                rating_keys=rating_keys,
+                year_from=year_from,
+                year_to=year_to,
+                watch_state=watch_state,
+                favorites_only=favorites_only,
+                artist_keys=artist_keys,
+                album_artist_keys=album_artist_keys,
+                album_type_keys=album_type_keys,
             )
         rows = self.db.execute(
             "SELECT id,library_id,parent_id,entity_type,relative_path,season_number,episode_number,episode_end_number,created_at,updated_at FROM library_entities WHERE library_id=? AND parent_id IS ?",
             (library_id, parent_id),
         )
+        if (
+            genre_keys
+            or rating_keys
+            or year_from is not None
+            or year_to is not None
+            or watch_state
+            or favorites_only
+            or artist_keys
+            or album_artist_keys
+            or album_type_keys
+        ):
+            rows = [
+                row
+                for row in rows
+                if _catalog_metadata_matches(
+                    self.metadata(user_id, row[0], language)["metadata"],
+                    genre_keys,
+                    rating_keys,
+                    year_from=year_from,
+                    year_to=year_to,
+                    watch_state=watch_state,
+                    favorites_only=favorites_only,
+                    user_state=self._state(user_id, row[0]),
+                    artist_keys=artist_keys,
+                    album_artist_keys=album_artist_keys,
+                    album_type_keys=album_type_keys,
+                )
+            ]
         hierarchy_parent = None
         if parent_id:
             hierarchy_parent = self.require_entity(user_id, parent_id)[3]

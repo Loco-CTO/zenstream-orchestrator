@@ -5347,6 +5347,23 @@
           "facets": {
             "fixtureKey": 1
           },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
+          },
           "hasNext": true,
           "items": [
             {
@@ -5626,6 +5643,23 @@
         "body": {
           "facets": {
             "fixtureKey": 1
+          },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
           },
           "hasNext": true,
           "items": [
@@ -5910,6 +5944,23 @@
         "body": {
           "facets": {
             "fixtureKey": 1
+          },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
           },
           "hasNext": true,
           "items": [
@@ -6426,15 +6477,35 @@
         "method": "GET",
         "parameters": {
           "query": {
+            "albumArtist": [
+              "x"
+            ],
+            "albumType": [
+              "x"
+            ],
+            "artist": [
+              "Fixture Item"
+            ],
+            "favoritesOnly": true,
+            "genre": [
+              "x"
+            ],
+            "includeFilterOptions": true,
             "language": "x",
             "libraryId": "fixture-id",
             "limit": 1,
+            "officialRating": [
+              "x"
+            ],
             "page": 1,
             "pageSize": 40,
             "parentId": "fixture-id",
             "sortBy": "x",
             "sortOrder": "ascending",
-            "view": "full"
+            "view": "full",
+            "watchState": "x",
+            "yearFrom": 1,
+            "yearTo": 1
           }
         },
         "path": "/api/catalog/items",
@@ -6444,6 +6515,23 @@
         "body": {
           "facets": {
             "fixtureKey": 1
+          },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
           },
           "hasNext": true,
           "items": [
@@ -7091,6 +7179,23 @@
           "facets": {
             "fixtureKey": 1
           },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
+          },
           "hasNext": true,
           "items": [
             {
@@ -7651,6 +7756,23 @@
           "facets": {
             "fixtureKey": 1
           },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
+          },
           "hasNext": true,
           "items": [
             {
@@ -7972,6 +8094,23 @@
               "facets": {
                 "fixtureKey": 1
               },
+              "filterOptions": {
+                "albumArtists": [
+                  "x"
+                ],
+                "albumTypes": [
+                  "x"
+                ],
+                "artists": [
+                  "x"
+                ],
+                "genres": [
+                  "x"
+                ],
+                "officialRatings": [
+                  "x"
+                ]
+              },
               "hasNext": true,
               "items": [
                 {
@@ -8255,14 +8394,34 @@
         "method": "GET",
         "parameters": {
           "query": {
+            "albumArtist": [
+              "x"
+            ],
+            "albumType": [
+              "x"
+            ],
+            "artist": [
+              "Fixture Item"
+            ],
+            "favoritesOnly": true,
+            "genre": [
+              "x"
+            ],
+            "includeFilterOptions": true,
             "language": "x",
             "libraryId": "fixture-id",
             "limit": 1,
+            "officialRating": [
+              "x"
+            ],
             "page": 1,
             "pageSize": 40,
             "sortBy": "x",
             "sortOrder": "ascending",
-            "view": "full"
+            "view": "full",
+            "watchState": "x",
+            "yearFrom": 1,
+            "yearTo": 1
           }
         },
         "path": "/api/catalog/music/albums",
@@ -8718,6 +8877,23 @@
         "body": {
           "facets": {
             "fixtureKey": 1
+          },
+          "filterOptions": {
+            "albumArtists": [
+              "x"
+            ],
+            "albumTypes": [
+              "x"
+            ],
+            "artists": [
+              "x"
+            ],
+            "genres": [
+              "x"
+            ],
+            "officialRatings": [
+              "x"
+            ]
           },
           "hasNext": true,
           "items": [

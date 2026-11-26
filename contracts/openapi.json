@@ -2223,6 +2223,48 @@
         "title": "CatalogCredits",
         "type": "object"
       },
+      "CatalogFilterOptions": {
+        "additionalProperties": true,
+        "properties": {
+          "albumArtists": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Albumartists",
+            "type": "array"
+          },
+          "albumTypes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Albumtypes",
+            "type": "array"
+          },
+          "artists": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Artists",
+            "type": "array"
+          },
+          "genres": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Genres",
+            "type": "array"
+          },
+          "officialRatings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Officialratings",
+            "type": "array"
+          }
+        },
+        "title": "CatalogFilterOptions",
+        "type": "object"
+      },
       "CatalogHomeResponse": {
         "additionalProperties": true,
         "properties": {
@@ -2238,6 +2280,17 @@
             ],
             "title": "Facets",
             "type": "object"
+          },
+          "filterOptions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogFilterOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "hasNext": {
             "anyOf": [
@@ -3430,6 +3483,17 @@
             ],
             "title": "Facets",
             "type": "object"
+          },
+          "filterOptions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CatalogFilterOptions"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           },
           "hasNext": {
             "anyOf": [
@@ -25248,6 +25312,156 @@
             }
           },
           {
+            "description": "genre value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "genre",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Genre",
+              "type": "array"
+            }
+          },
+          {
+            "description": "officialRating value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "officialRating",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Officialrating",
+              "type": "array"
+            }
+          },
+          {
+            "description": "yearFrom value supplied in the query component.",
+            "in": "query",
+            "name": "yearFrom",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Yearfrom"
+            }
+          },
+          {
+            "description": "yearTo value supplied in the query component.",
+            "in": "query",
+            "name": "yearTo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Yearto"
+            }
+          },
+          {
+            "description": "watchState value supplied in the query component.",
+            "in": "query",
+            "name": "watchState",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Watchstate"
+            }
+          },
+          {
+            "description": "favoritesOnly value supplied in the query component.",
+            "example": false,
+            "in": "query",
+            "name": "favoritesOnly",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Favoritesonly",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "artist value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "artist",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Artist",
+              "type": "array"
+            }
+          },
+          {
+            "description": "albumArtist value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "albumArtist",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Albumartist",
+              "type": "array"
+            }
+          },
+          {
+            "description": "albumType value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "albumType",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Albumtype",
+              "type": "array"
+            }
+          },
+          {
+            "description": "includeFilterOptions value supplied in the query component.",
+            "example": false,
+            "in": "query",
+            "name": "includeFilterOptions",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Includefilteroptions",
+              "type": "boolean"
+            }
+          },
+          {
             "description": "One-based page number.",
             "example": 1,
             "in": "query",
@@ -27045,6 +27259,156 @@
                 }
               ],
               "title": "Language"
+            }
+          },
+          {
+            "description": "genre value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "genre",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Genre",
+              "type": "array"
+            }
+          },
+          {
+            "description": "officialRating value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "officialRating",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Officialrating",
+              "type": "array"
+            }
+          },
+          {
+            "description": "yearFrom value supplied in the query component.",
+            "in": "query",
+            "name": "yearFrom",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Yearfrom"
+            }
+          },
+          {
+            "description": "yearTo value supplied in the query component.",
+            "in": "query",
+            "name": "yearTo",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Yearto"
+            }
+          },
+          {
+            "description": "watchState value supplied in the query component.",
+            "in": "query",
+            "name": "watchState",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Watchstate"
+            }
+          },
+          {
+            "description": "favoritesOnly value supplied in the query component.",
+            "example": false,
+            "in": "query",
+            "name": "favoritesOnly",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Favoritesonly",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "artist value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "artist",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Artist",
+              "type": "array"
+            }
+          },
+          {
+            "description": "albumArtist value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "albumArtist",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Albumartist",
+              "type": "array"
+            }
+          },
+          {
+            "description": "albumType value supplied in the query component.",
+            "example": [],
+            "in": "query",
+            "name": "albumType",
+            "required": false,
+            "schema": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Albumtype",
+              "type": "array"
+            }
+          },
+          {
+            "description": "includeFilterOptions value supplied in the query component.",
+            "example": false,
+            "in": "query",
+            "name": "includeFilterOptions",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Includefilteroptions",
+              "type": "boolean"
             }
           },
           {

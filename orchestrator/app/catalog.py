@@ -2279,13 +2279,10 @@ class Catalog:
         artist_rows = []
         album_artist_rows = []
         album_type_rows = []
-        can_read_projection = (
-            self._read_model_ready()
-            and self._has_table("catalog_item_projection")
+        can_read_projection = self._read_model_ready() and self._has_table(
+            "catalog_item_projection"
         )
-        has_music_page = (
-            music_albums and self._has_table("catalog_music_album_page")
-        )
+        has_music_page = music_albums and self._has_table("catalog_music_album_page")
         if can_read_projection and (not music_albums or has_music_page):
             if has_music_page:
                 genre_params = [locale, *library_ids]
@@ -2523,8 +2520,7 @@ class Catalog:
             album_type_keys=album_type_keys,
         )
         where_clause = (
-            "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ?"
-            + filter_clause
+            "WHERE p.locale=? AND p.library_id=? AND p.parent_id IS ?" + filter_clause
         )
         base_params: list[object] = [
             language,
@@ -2533,8 +2529,7 @@ class Catalog:
             *filter_params,
         ]
         count_rows = self.db.execute(
-            "SELECT COUNT(*) FROM catalog_item_projection p "
-            + where_clause,
+            "SELECT COUNT(*) FROM catalog_item_projection p " + where_clause,
             base_params,
         )
         total = int(count_rows[0][0] or 0) if count_rows else 0
@@ -3434,9 +3429,7 @@ class Catalog:
                 + filter_clause,
                 [page_language, *sorted(library_ids), *filter_params],
             )
-            total = (
-                int(filtered_count_rows[0][0] or 0) if filtered_count_rows else 0
-            )
+            total = int(filtered_count_rows[0][0] or 0) if filtered_count_rows else 0
         direction = "DESC" if sort_order.casefold() == "descending" else "ASC"
         sort_key = str(sort_by or "title").casefold()
         order_column = (

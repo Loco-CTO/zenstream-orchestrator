@@ -9,6 +9,11 @@ from pathlib import PurePath
 from threading import Lock
 
 from app.config import Config
+from app.discord_webhooks import (
+    finish_viewer,
+    record_viewer_sample,
+    viewer_notifications_enabled,
+)
 
 
 def _now() -> datetime:
@@ -188,10 +193,42 @@ class PlaybackViewerStore:
         now = _now()
         cutoff = _iso(now - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SECONDS))
         with self.db.transaction() as cursor:
-            cursor.execute(
-                "UPDATE playback_viewer_sessions SET state='expired',ended_at=? WHERE state='active' AND last_heartbeat_at<?",
-                (_iso(now), cutoff),
+            expire_sql = (
+                "UPDATE playback_viewer_sessions SET state='expired',ended_at=? "
+                "WHERE state='active' AND last_heartbeat_at<?"
             )
+            columns = {
+                row[1]
+                for row in self.db.read_execute(
+                    "PRAGMA table_info(playback_viewer_sessions)"
+                )
+            }
+            event_columns = {
+                "user_id",
+                "entity_id",
+                "position_seconds",
+                "duration_seconds",
+            }
+            if event_columns.issubset(columns):
+                expired = cursor.execute(
+                    expire_sql
+                    + " RETURNING id,user_id,entity_id,position_seconds,duration_seconds",
+                    (_iso(now), cutoff),
+                ).fetchall()
+            else:
+                cursor.execute(expire_sql, (_iso(now), cutoff))
+                expired = []
+            if expired:
+                for viewer_id, user_id, entity_id, position, duration in expired:
+                    finish_viewer(
+                        cursor,
+                        viewer_id,
+                        "playback.disconnected",
+                        user=user_id,
+                        entity=entity_id,
+                        position=position,
+                        duration=duration,
+                    )
             cursor.execute(
                 "UPDATE playback_viewer_commands SET state='expired' WHERE state IN ('pending','delivered') AND expires_at<=?",
                 (_iso(now),),
@@ -510,7 +547,7 @@ class PlaybackViewerStore:
             acks = []
         with self.db.transaction() as cursor:
             row = cursor.execute(
-                "SELECT device_id,worker_session_id,state FROM playback_viewer_sessions WHERE id=? AND user_id=? AND auth_session_id=?",
+                "SELECT device_id,worker_session_id,state,entity_id,duration_seconds,mode FROM playback_viewer_sessions WHERE id=? AND user_id=? AND auth_session_id=?",
                 (viewer_id, user_id, auth_session_id),
             ).fetchone()
             if not row or row[2] != "active":
@@ -538,6 +575,17 @@ class PlaybackViewerStore:
                     ),
                 )
             if persist_heartbeat:
+                if viewer_notifications_enabled(cursor):
+                    record_viewer_sample(
+                        cursor,
+                        viewer_id,
+                        user_id,
+                        row[3],
+                        position,
+                        duration or row[4],
+                        bool(payload.get("paused")),
+                        row[5],
+                    )
                 cursor.execute(
                     "UPDATE playback_viewer_sessions SET position_seconds=?,duration_seconds=COALESCE(?,duration_seconds),paused=?,last_heartbeat_at=?,worker_session_id=COALESCE(?,worker_session_id) WHERE id=?",
                     (
@@ -577,11 +625,21 @@ class PlaybackViewerStore:
         now = _iso()
         with self.db.transaction() as cursor:
             row = cursor.execute(
-                "SELECT worker_session_id,state FROM playback_viewer_sessions WHERE id=? AND user_id=? AND auth_session_id=?",
+                "SELECT worker_session_id,state,entity_id,position_seconds,duration_seconds FROM playback_viewer_sessions WHERE id=? AND user_id=? AND auth_session_id=?",
                 (viewer_id, user_id, auth_session_id),
             ).fetchone()
             if not row:
                 raise LookupError("Playback viewer not found.")
+            if row[1] == "active":
+                finish_viewer(
+                    cursor,
+                    viewer_id,
+                    "playback.stopped",
+                    user=user_id,
+                    entity=row[2],
+                    position=row[3],
+                    duration=row[4],
+                )
             cursor.execute(
                 "UPDATE playback_viewer_sessions SET state='ended',ended_at=?,last_heartbeat_at=? WHERE id=? AND state='active'",
                 (now, now, viewer_id),

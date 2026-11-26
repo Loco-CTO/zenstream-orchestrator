@@ -4686,6 +4686,9 @@ class Catalog:
             changed_rows = cursor.execute("SELECT changes()").fetchone()
             inserted = bool(changed_rows and changed_rows[0])
             if inserted:
+                from app.discord_webhooks import publish
+
+                publish("music.started", cursor=cursor, user=user_id, entity=entity_id)
                 track_state = self._direct_state(
                     self._state_row(user_id, entity_id, cursor)
                 )

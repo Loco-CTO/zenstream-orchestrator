@@ -34,7 +34,8 @@ This repository owns the FastAPI Orchestrator, SQLite persistence, catalog scann
 - `python orchestrator/scripts/export_openapi.py --check` — check OpenAPI freshness.
 - `python orchestrator/scripts/generate_contract_fixtures.py --check` — check fixture freshness.
 - From `launcher/`: `npm ci` and `npm test` — launcher tests.
-- `scripts/build-windows.ps1` creates Windows release artifacts; `.github/workflows/release.yaml` owns draft release creation and asset uploads.
+- Windows CI and release both run `scripts/test-windows-runtime.ps1`. The release workflow builds the Windows package once with signing configured, smoke-tests its backend, and then publishes the verified artifacts.
+- The `coverage` check requires both the test coverage and production Docker Compose jobs to pass.
 
 ## Documentation conventions
 

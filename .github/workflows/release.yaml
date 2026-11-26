@@ -206,14 +206,8 @@ jobs:
       candidate_sha: ${{ needs.candidate.outputs.sha }}
       skip_coverage_upload: true
 
-  validate-windows:
-    needs: candidate
-    uses: ./.github/workflows/windows-launcher.yml
-    with:
-      candidate_sha: ${{ needs.candidate.outputs.sha }}
-
   publish:
-    needs: [candidate, validate, validate-windows]
+    needs: [candidate, validate]
     runs-on: windows-latest
     steps:
       - name: Check out exact candidate
@@ -249,6 +243,10 @@ jobs:
           assert_candidate_ref_state "$CANDIDATE_REF" "$CANDIDATE_SHA" "$CANDIDATE_REF_PRESENT"
           assert_ref_state refs/heads/main "$BASE_MAIN" "$CANDIDATE_SHA"
           assert_ref_state refs/heads/stable "$BASE_STABLE" "$CANDIDATE_SHA"
+
+      - name: Verify native Windows runtime regressions
+        shell: pwsh
+        run: ./scripts/test-windows-runtime.ps1
 
       - name: Build signed-ready Windows artifacts
         shell: pwsh

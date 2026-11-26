@@ -35,11 +35,31 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
         self.assertRegex(workflow, r"release-candidate/")
         self.assertRegex(workflow, r"assert_ref_state")
         publish = job_block(workflow, "publish")
-        self.assertIn("validate-windows", publish)
+        self.assertLess(
+            publish.index("scripts/test-windows-runtime.ps1"),
+            publish.index("scripts/build-windows.ps1"),
+        )
+        self.assertLess(
+            publish.index("scripts/build-windows.ps1"),
+            publish.index("scripts/smoke-windows-backend.mjs"),
+        )
         self.assertLess(
             publish.index("scripts/smoke-windows-backend.mjs"),
             publish.index("Upload and verify Windows release assets"),
         )
+
+    def test_coverage_check_requires_the_parallel_test_and_docker_jobs(self) -> None:
+        coverage = (ROOT / ".github" / "workflows" / "coverage.yml").read_text(
+            encoding="utf-8"
+        )
+        gate = job_block(coverage, "coverage")
+        self.assertIn("needs: [test-coverage, docker-smoke]", gate)
+        self.assertIn("if: always()", gate)
+        self.assertIn('test "$TEST_RESULT" = success && test "$DOCKER_RESULT" = success', gate)
+        self.assertIn("python -m coverage run", job_block(coverage, "test-coverage"))
+        docker = job_block(coverage, "docker-smoke")
+        self.assertRegex(docker, r"ref:.*inputs\.candidate_sha")
+        self.assertIn("scripts/smoke-docker.sh", docker)
 
     def test_new_release_candidate_refreshes_openapi_snapshot(self) -> None:
         workflow = RELEASE.read_text(encoding="utf-8")

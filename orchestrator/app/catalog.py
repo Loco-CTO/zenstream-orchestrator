@@ -3370,16 +3370,16 @@ class Catalog:
         page_size: int,
         sort_by: str | None,
         sort_order: str,
-        genre_keys: list[str],
-        rating_keys: list[str],
-        genre_values: list[str],
-        year_from: int | None,
-        year_to: int | None,
-        watch_state: str | None,
-        favorites_only: bool,
-        artist_keys: list[str],
-        album_artist_keys: list[str],
-        album_type_keys: list[str],
+        genre_keys: list[str] | None = None,
+        rating_keys: list[str] | None = None,
+        genre_values: list[str] | None = None,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        watch_state: str | None = None,
+        favorites_only: bool = False,
+        artist_keys: list[str] | None = None,
+        album_artist_keys: list[str] | None = None,
+        album_type_keys: list[str] | None = None,
     ) -> dict:
         placeholders = ",".join("?" for _ in library_ids)
         count_rows = self.db.execute(
@@ -3406,18 +3406,18 @@ class Catalog:
                 page_language = str(locale_rows[0][0])
                 total = int(locale_rows[0][1] or 0)
         filter_clause, filter_params = self._catalog_filter_clause(
-            genre_keys,
-            rating_keys,
+            genre_keys or [],
+            rating_keys or [],
             user_id=user_id,
             projection_alias="projection",
-            genre_values=genre_values,
+            genre_values=genre_values or [],
             year_from=year_from,
             year_to=year_to,
             watch_state=watch_state,
             favorites_only=favorites_only,
-            artist_keys=artist_keys,
-            album_artist_keys=album_artist_keys,
-            album_type_keys=album_type_keys,
+            artist_keys=artist_keys or [],
+            album_artist_keys=album_artist_keys or [],
+            album_type_keys=album_type_keys or [],
         )
         if filter_clause:
             filtered_count_rows = self.db.execute(

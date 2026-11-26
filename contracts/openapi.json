@@ -10883,6 +10883,65 @@
         "title": "SonarrCalendarConnectionUpdate",
         "type": "object"
       },
+      "StorageOverview": {
+        "properties": {
+          "categories": {
+            "items": {
+              "$ref": "#/components/schemas/StorageUsage"
+            },
+            "title": "Categories",
+            "type": "array"
+          },
+          "measuredAt": {
+            "format": "date-time",
+            "title": "Measuredat",
+            "type": "string"
+          },
+          "totalBytes": {
+            "title": "Totalbytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "measuredAt",
+          "totalBytes",
+          "categories"
+        ],
+        "title": "StorageOverview",
+        "type": "object"
+      },
+      "StorageUsage": {
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "category": {
+            "enum": [
+              "media",
+              "metadata",
+              "artwork",
+              "trickplay",
+              "transcodes",
+              "offline",
+              "lumi"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "unreadablePaths": {
+            "title": "Unreadablepaths",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "category",
+          "bytes",
+          "unreadablePaths"
+        ],
+        "title": "StorageUsage",
+        "type": "object"
+      },
       "SyncAcknowledgement": {
         "properties": {
           "id": {
@@ -22974,6 +23033,141 @@
         "summary": "Send a playback command",
         "tags": [
           "Admin · Playback & Maintenance"
+        ]
+      }
+    },
+    "/api/admin/storage": {
+      "get": {
+        "description": "Get /api/admin/storage. Administrator authentication is required; existing cookie and legacy-header clients remain supported. Method: `GET`; path: `/api/admin/storage`.",
+        "operationId": "get_api_admin_storage",
+        "parameters": [
+          {
+            "description": "Request a fresh storage measurement.",
+            "example": false,
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Request a fresh storage measurement.",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Legacy administrator identity header retained for dashboard compatibility.",
+            "in": "header",
+            "name": "Username",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Username"
+            }
+          },
+          {
+            "description": "Sensitive legacy administrator credential; never log this value.",
+            "in": "header",
+            "name": "TOKEN",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Token",
+              "writeOnly": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StorageOverview"
+                }
+              }
+            },
+            "description": "The operation completed successfully."
+          },
+          "202": {
+            "description": "Storage measurement is in progress.",
+            "headers": {
+              "Retry-After": {
+                "description": "Seconds before polling again.",
+                "schema": {
+                  "example": 2,
+                  "type": "integer"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Authentication is required or the supplied credential has expired."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "query",
+                        "refresh"
+                      ],
+                      "msg": "Input should be a valid boolean, unable to interpret input",
+                      "type": "bool_parsing"
+                    }
+                  ]
+                },
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationErrorResponse"
+                }
+              }
+            },
+            "description": "Request validation failed."
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "The required service or media tool is unavailable."
+          }
+        },
+        "security": [
+          {
+            "AdminSessionCookie": []
+          },
+          {
+            "AdminTokenHeader": [],
+            "AdminUsernameHeader": []
+          }
+        ],
+        "summary": "Get /api/admin/storage",
+        "tags": [
+          "Admin · Identity & Access"
         ]
       }
     },

@@ -33,6 +33,7 @@ from app.models.syncplay import (
 )
 from app.paths import PROJECT_ROOT
 from app.playback import ffmpeg_path, ffprobe_path
+from app.storage_overview import StorageOverview, storage_overview
 from app.trickplay import TrickplayExtractor
 from fastapi import (
     APIRouter,
@@ -871,6 +872,27 @@ async def admin_update_profile(
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     return {"username": result["username"]}
+
+
+@router.get("/api/admin/storage", response_model=StorageOverview)
+async def admin_storage(
+    request: Request,
+    response: Response,
+    refresh: bool = Query(False, description="Request a fresh storage measurement."),
+    Username: str | None = Header(None),
+    TOKEN: str | None = Header(None),
+):
+    await _admin_request_async(request, Username, TOKEN)
+    pending, overview = await storage_overview(refresh)
+    headers = {"Cache-Control": "no-store"}
+    if pending:
+        return Response(status_code=202, headers={**headers, "Retry-After": "2"})
+    if overview is None:
+        raise HTTPException(
+            503, "Storage usage could not be measured.", headers=headers
+        )
+    response.headers.update(headers)
+    return overview
 
 
 @router.get("/api/admin/overview")

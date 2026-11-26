@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -13,3 +14,7 @@ def metadata_directory() -> Path:
         return PROJECT_ROOT / "sqlite"
     directory = Path(configured).expanduser()
     return directory if directory.is_absolute() else PROJECT_ROOT / directory
+
+
+def transcode_directory() -> Path:
+    return Path(tempfile.gettempdir()) / "zenstream-transcodes"

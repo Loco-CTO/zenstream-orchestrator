@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IconDownload, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { useVisiblePolling } from "../components/use-visible-polling";
 import {
 	ConfirmDialog,
 	PageHeader,
@@ -720,19 +721,21 @@ export default function LumiSettingsPage() {
 	const shouldPoll =
 		integrationBusy || integration?.state === "installing" || hasDownload;
 
-	useEffect(() => {
-		if (!session || !shouldPoll) return undefined;
-		const timer = window.setInterval(() => {
-			load(session, true, false).catch((cause) => {
+	useVisiblePolling(
+		async () => {
+			if (session) await load(session, true, false);
+		},
+		{
+			intervalMs: 5_000,
+			enabled: Boolean(session && shouldPoll),
+			onError: (cause) =>
 				setError(
 					cause instanceof Error && cause.message
 						? safeText(cause.message)
 						: "Could not connect to the Orchestrator.",
-				);
-			});
-		}, 1500);
-		return () => window.clearInterval(timer);
-	}, [load, session, shouldPoll]);
+				),
+		},
+	);
 
 	/** Enables or disables the explicitly selected Lumi release. */
 	async function updateIntegration(enabled: boolean) {

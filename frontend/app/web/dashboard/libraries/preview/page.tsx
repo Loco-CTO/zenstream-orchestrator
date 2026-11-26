@@ -19,6 +19,7 @@ import {
 	readSession,
 	Session,
 } from "../../components/admin-client";
+import { useVisiblePolling } from "../../components/use-visible-polling";
 
 type Child = {
 	id: string;
@@ -344,15 +345,9 @@ function LibraryViewPage() {
 		);
 	}, [urlEntityId, urlEntityPathValue]);
 
-	useEffect(() => {
-		if (!session || !locale || !libraryId || navigation.length !== 0) return;
-		let cancelled = false;
-		let timer: number | undefined;
-		const refresh = async () => {
-			if (document.visibilityState !== "visible") {
-				timer = window.setTimeout(refresh, 2000);
-				return;
-			}
+	useVisiblePolling(
+		async () => {
+			if (!session || !libraryId) return;
 			try {
 				const response = await adminFetch(
 					`/api/admin/libraries/${libraryId}/catalog-status`,
@@ -382,14 +377,13 @@ function LibraryViewPage() {
 			} catch {
 				// The current grid remains usable while status polling is unavailable.
 			}
-			if (!cancelled) timer = window.setTimeout(refresh, 2000);
-		};
-		void refresh();
-		return () => {
-			cancelled = true;
-			if (timer) window.clearTimeout(timer);
-		};
-	}, [libraryId, locale, navigation.length, page, parent, session]);
+		},
+		{
+			intervalMs: 10_000,
+			enabled: Boolean(session && locale && libraryId && navigation.length === 0),
+			immediate: true,
+		},
+	);
 
 	useEffect(() => {
 		const onKeyDown = (event: KeyboardEvent) => {

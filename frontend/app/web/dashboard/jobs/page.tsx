@@ -10,6 +10,7 @@ import {
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import { DashboardModal } from "../components/dashboard-surface";
+import { useVisiblePolling } from "../components/use-visible-polling";
 import {
 	ArtworkVariantStatus,
 	Job,
@@ -481,6 +482,35 @@ export default function JobsPage() {
 		},
 		[refreshTask],
 	);
+	const activeTaskIds = useMemo(
+		() =>
+			jobs
+				.filter((job) => job.recentRuns?.some((run) => activeStates.has(run.state)))
+				.map((job) => job.id),
+		[jobs],
+	);
+	const artworkPrewarmActive = Boolean(
+		artworkStatus &&
+		(artworkStatus.state === "starting" ||
+			artworkStatus.state === "warming" ||
+			artworkStatus.queuedConversions > 0 ||
+			artworkStatus.activeConversions > 0 ||
+			artworkStatus.pendingConversions > 0),
+	);
+	useVisiblePolling(() => refreshArtworkStatus(session), {
+		intervalMs: artworkPrewarmActive ? 5_000 : 30_000,
+		enabled: Boolean(session),
+	});
+	useVisiblePolling(
+		async () => {
+			if (session && activeTaskIds.length > 0)
+				await refreshActiveTasks(session, activeTaskIds);
+		},
+		{
+			intervalMs: 5_000,
+			enabled: Boolean(session && activeTaskIds.length > 0),
+		},
+	);
 
 	useEffect(() => {
 		const legacyId = params.get("jobId");
@@ -495,42 +525,6 @@ export default function JobsPage() {
 		void load(current);
 		void refreshArtworkStatus(current);
 	}, [load, params, refreshArtworkStatus, router]);
-
-	useEffect(() => {
-		if (!session) return;
-		let polling = false;
-		const poll = async () => {
-			if (polling) return;
-			polling = true;
-			try {
-				await refreshArtworkStatus(session);
-			} finally {
-				polling = false;
-			}
-		};
-		const timer = window.setInterval(() => void poll(), 5000);
-		return () => window.clearInterval(timer);
-	}, [refreshArtworkStatus, session]);
-
-	useEffect(() => {
-		if (!session) return;
-		const activeTaskIds = jobs
-			.filter((job) => job.recentRuns?.some((run) => activeStates.has(run.state)))
-			.map((job) => job.id);
-		if (!activeTaskIds.length) return;
-		let polling = false;
-		const poll = async () => {
-			if (polling) return;
-			polling = true;
-			try {
-				await refreshActiveTasks(session, activeTaskIds);
-			} finally {
-				polling = false;
-			}
-		};
-		const timer = window.setInterval(() => void poll(), 2000);
-		return () => window.clearInterval(timer);
-	}, [jobs, refreshActiveTasks, session]);
 
 	const groups = useMemo<TaskGroup[]>(
 		() =>

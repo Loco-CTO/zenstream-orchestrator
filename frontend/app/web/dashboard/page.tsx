@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { adminFetch, readSession, Session } from "./components/admin-client";
+import { useVisiblePolling } from "./components/use-visible-polling";
 import {
 	SessionCard,
 	SessionCommand,
@@ -89,28 +90,23 @@ export default function DashboardOverview() {
 		if (current) void load(current);
 	}, [load]);
 
-	useEffect(() => {
-		if (!session || !tasks.some((task) => activeStates.has(task.lastState)))
-			return;
-		const timer = window.setInterval(() => void load(session), 2000);
-		return () => window.clearInterval(timer);
-	}, [load, session, tasks]);
-
-	useEffect(() => {
-		if (!session) return;
-		let active = true;
-		let timer: number | undefined;
-		const poll = async () => {
-			if (!active) return;
-			await loadSessions(session);
-			if (active) timer = window.setTimeout(() => void poll(), 2_000);
-		};
-		void poll();
-		return () => {
-			active = false;
-			if (timer !== undefined) window.clearTimeout(timer);
-		};
-	}, [loadSessions, session]);
+	const hasActiveTasks = tasks.some((task) => activeStates.has(task.lastState));
+	useVisiblePolling(
+		async () => {
+			if (session) await loadSessions(session);
+		},
+		{
+			intervalMs: sessions.length > 0 ? 10_000 : 30_000,
+			enabled: Boolean(session),
+			immediate: true,
+		},
+	);
+	useVisiblePolling(
+		async () => {
+			if (session) await load(session);
+		},
+		{ intervalMs: 5_000, enabled: Boolean(session && hasActiveTasks) },
+	);
 
 	async function issueCommand(viewerId: string, command: SessionCommand) {
 		if (!session) return;

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { IconPlayerPlay, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
+import { useVisiblePolling } from "../components/use-visible-polling";
 import { activeStates, stateLabel } from "../jobs/job-types";
 import {
 	ConfirmDialog,
@@ -131,11 +132,12 @@ export default function IntroOutroPage() {
 			void loadLibraries(current);
 		}
 	}, [load]);
-	useEffect(() => {
-		if (!session || !task?.lastState || !activeStates.has(task.lastState)) return;
-		const timer = window.setInterval(() => void load(session), 2000);
-		return () => window.clearInterval(timer);
-	}, [load, session, task?.lastState]);
+	useVisiblePolling(() => load(session), {
+		intervalMs: 5_000,
+		enabled: Boolean(
+			session && task?.lastState && activeStates.has(task.lastState),
+		),
+	});
 	async function save() {
 		if (!session) return;
 		setSaving(true);

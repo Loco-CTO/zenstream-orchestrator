@@ -14,6 +14,7 @@ import {
 } from "@tabler/icons-react";
 import { adminFetch, readSession, Session } from "../components/admin-client";
 import { DashboardModal } from "../components/dashboard-surface";
+import { useVisiblePolling } from "../components/use-visible-polling";
 import {
 	Job,
 	JobTrigger,
@@ -141,15 +142,15 @@ export default function JobDetailPage() {
 		setSession(current);
 		if (current) void load(current);
 	}, [load]);
-	useEffect(() => {
-		if (
-			!session ||
-			!selected?.recentRuns?.some((run) => activeStates.has(run.state))
-		)
-			return;
-		const timer = window.setInterval(() => void load(session, false), 2000);
-		return () => window.clearInterval(timer);
-	}, [load, selected, session]);
+	const hasActiveRun = Boolean(
+		selected?.recentRuns?.some((run) => activeStates.has(run.state)),
+	);
+	useVisiblePolling(
+		async () => {
+			if (session) await load(session, false);
+		},
+		{ intervalMs: 5_000, enabled: Boolean(session && hasActiveRun) },
+	);
 
 	function updateSelected(change: (job: Job) => Job) {
 		setJobs((current) =>

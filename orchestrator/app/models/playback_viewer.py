@@ -193,12 +193,31 @@ class PlaybackViewerStore:
         now = _now()
         cutoff = _iso(now - timedelta(seconds=self.HEARTBEAT_TIMEOUT_SECONDS))
         with self.db.transaction() as cursor:
-            expired = cursor.execute(
+            expire_sql = (
                 "UPDATE playback_viewer_sessions SET state='expired',ended_at=? "
-                "WHERE state='active' AND last_heartbeat_at<? "
-                "RETURNING id,user_id,entity_id,position_seconds,duration_seconds",
-                (_iso(now), cutoff),
-            ).fetchall()
+                "WHERE state='active' AND last_heartbeat_at<?"
+            )
+            columns = {
+                row[1]
+                for row in self.db.read_execute(
+                    "PRAGMA table_info(playback_viewer_sessions)"
+                )
+            }
+            event_columns = {
+                "user_id",
+                "entity_id",
+                "position_seconds",
+                "duration_seconds",
+            }
+            if event_columns.issubset(columns):
+                expired = cursor.execute(
+                    expire_sql
+                    + " RETURNING id,user_id,entity_id,position_seconds,duration_seconds",
+                    (_iso(now), cutoff),
+                ).fetchall()
+            else:
+                cursor.execute(expire_sql, (_iso(now), cutoff))
+                expired = []
             if expired:
                 for viewer_id, user_id, entity_id, position, duration in expired:
                     finish_viewer(

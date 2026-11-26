@@ -624,6 +624,40 @@ class ClientCatalogPerformanceRouteTest(unittest.TestCase):
             ["three"],
         )
 
+    def test_home_limit_counts_stacked_series_and_preserves_their_episodes(self):
+        def episode(entity_id: str, series_id: str) -> dict:
+            return {
+                "id": entity_id,
+                "seriesId": series_id,
+                "metadata": {},
+                "userState": {},
+            }
+
+        items = [
+            episode(f"series-a-{index}", "series-a") for index in range(18)
+        ] + [
+            episode(f"series-{index}", f"series-{index}")
+            for index in range(1, 18)
+        ]
+        payload = {
+            "libraryRows": [
+                {"libraryId": "tv", "stackEpisodes": True, "items": items}
+            ]
+        }
+
+        compact = client_routes._catalog_response(payload, "card", limit=18)
+        limited = client_routes._catalog_response(payload, "card", limit=1)
+
+        self.assertEqual(len(compact["libraryRows"][0]["items"]), 35)
+        self.assertEqual(
+            len({item["seriesId"] for item in compact["libraryRows"][0]["items"]}),
+            18,
+        )
+        self.assertEqual(
+            [item["id"] for item in limited["libraryRows"][0]["items"]],
+            [f"series-a-{index}" for index in range(18)],
+        )
+
     def test_invalid_catalog_view_is_rejected(self):
         with self.assertRaises(client_routes.HTTPException) as raised:
             client_routes._catalog_response({}, "summary")

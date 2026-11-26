@@ -377,23 +377,53 @@ def _catalog_response(value, view: str | None, limit: int | None = None):
     if view != "card" and limit is None:
         return value
 
-    def transform(current):
+    def transform(current, *, stack_episode_items: bool = False):
         if _catalog_item(current):
             return _card_item(current) if view == "card" else current
         if isinstance(current, list):
-            items = [transform(item) for item in current]
+            items = current
             if (
                 limit is not None
                 and items
                 and all(_catalog_item(item) for item in items)
             ):
-                return items[:limit]
-            return items
+                items = (
+                    _limit_stacked_catalog_items(items, limit)
+                    if stack_episode_items
+                    else items[:limit]
+                )
+            return [transform(item) for item in items]
         if isinstance(current, dict):
-            return {key: transform(item) for key, item in current.items()}
+            stacked_row = current.get("stackEpisodes") is True
+            return {
+                key: transform(
+                    item,
+                    stack_episode_items=stacked_row and key == "items",
+                )
+                for key, item in current.items()
+            }
         return current
 
     return transform(value)
+
+
+def _limit_stacked_catalog_items(items: list[dict], limit: int) -> list[dict]:
+    """Preserve every episode in the first `limit` series stacks."""
+    selected = []
+    series_ids: set[str] = set()
+    for item in items:
+        series_id = item.get("seriesId")
+        group_id = (
+            f"series:{series_id}"
+            if isinstance(series_id, str) and series_id
+            else f"item:{item['id']}"
+        )
+        if group_id not in series_ids:
+            if len(series_ids) >= limit:
+                continue
+            series_ids.add(group_id)
+        selected.append(item)
+    return selected
 
 
 def _client_address(request: Request) -> str:

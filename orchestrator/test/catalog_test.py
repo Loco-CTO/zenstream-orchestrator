@@ -1423,7 +1423,7 @@ class CatalogTest(unittest.TestCase):
 
         self.assertEqual(
             [item["id"] for item in rows["allowed"]["items"]],
-            ["episode-2", "episode-1"],
+            ["episode-2"],
         )
         self.assertTrue(rows["allowed"]["stackEpisodes"])
         self.assertEqual(rows["allowed"]["items"][0]["seriesName"], "series 1")
@@ -1434,11 +1434,93 @@ class CatalogTest(unittest.TestCase):
         self.assertNotIn("hidden", rows)
 
         allowed_row = catalog.home_library(user_id, "en", "allowed")
-        self.assertEqual(
-            [item["id"] for item in allowed_row["items"]], ["episode-2", "episode-1"]
-        )
+        self.assertEqual([item["id"] for item in allowed_row["items"]], ["episode-2"])
         self.assertTrue(allowed_row["stackEpisodes"])
         self.assertIsNone(catalog.home_library(user_id, "en", "hidden"))
+
+    @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
+    def test_home_newly_added_fills_series_cards_and_keeps_each_latest_batch(
+        self, _languages
+    ):
+        user_id = self.account().create("series-diversity", "password-123")["id"]
+        self.db.execute(
+            "INSERT INTO user_library_access VALUES(?,?,?)",
+            (user_id, "allowed", "now"),
+        )
+        self.db.execute("UPDATE libraries SET type='tv_series' WHERE id='allowed'")
+        self.db.execute(
+            "CREATE TABLE media_files("
+            "id TEXT PRIMARY KEY,entity_id TEXT,relative_path TEXT,"
+            "role TEXT,modified_ns INTEGER)"
+        )
+
+        base_ns = 1_800_000_000_000_000_000
+        batch_window_ns = 3_600_000_000_000
+        added_episodes: dict[str, int] = {}
+        for series_index in range(18):
+            series_id = f"series-{series_index:02}"
+            episode_numbers = range(19) if series_index == 0 else (1,)
+            episode_ids = self.add_series_episodes(
+                user_id, series_id, episode_numbers, grant=False
+            )
+            for number, episode_id in zip(episode_numbers, episode_ids):
+                if series_index == 0 and number == 0:
+                    modified_ns = base_ns - 2 * batch_window_ns
+                elif series_index == 0:
+                    modified_ns = base_ns - (number - 1) * 60_000_000_000
+                else:
+                    modified_ns = base_ns - (2 * series_index) * batch_window_ns
+                added_episodes[episode_id] = modified_ns
+                self.db.execute(
+                    "INSERT INTO media_files VALUES(?,?,?,?,?)",
+                    (
+                        f"{episode_id}-file",
+                        episode_id,
+                        f"{episode_id}.mkv",
+                        "media",
+                        modified_ns,
+                    ),
+                )
+
+        catalog = self.catalog()
+        self.patch_catalog_metadata(catalog)
+        row = catalog.home_library(user_id, "en", "allowed")
+
+        self.assertTrue(row["stackEpisodes"])
+        self.assertEqual(len({item["seriesId"] for item in row["items"]}), 18)
+        self.assertEqual(
+            [item["seriesId"] for item in row["items"][:18]], ["series-00"] * 18
+        )
+        self.assertEqual(len(row["items"]), 35)
+        self.assertNotIn("series-00-episode-0", {item["id"] for item in row["items"]})
+        self.assertEqual(
+            list(dict.fromkeys(item["seriesId"] for item in row["items"])),
+            [f"series-{index:02}" for index in range(18)],
+        )
+
+        self.db.execute(
+            "CREATE TABLE catalog_entity_summary("
+            "entity_id TEXT,library_id TEXT,entity_type TEXT,media_file_count INTEGER,"
+            "last_added_sort_ns INTEGER,media_last_added_ns INTEGER)"
+        )
+        for episode_id, modified_ns in added_episodes.items():
+            self.db.execute(
+                "INSERT INTO catalog_entity_summary VALUES(?,?,?,?,?,?)",
+                (
+                    episode_id,
+                    "allowed",
+                    "episode",
+                    1,
+                    modified_ns,
+                    modified_ns,
+                ),
+            )
+        read_model_catalog = self.catalog()
+        read_model_catalog._read_model_ready = lambda: True
+        self.assertEqual(
+            [row[0] for row in read_model_catalog._newly_added_episode_rows("allowed")],
+            [row[0] for row in catalog._newly_added_episode_rows("allowed")],
+        )
 
     @patch("app.catalog.MetadataLanguageSettings.get", return_value=["en"])
     def test_home_featured_uses_series_added_date(self, _languages):

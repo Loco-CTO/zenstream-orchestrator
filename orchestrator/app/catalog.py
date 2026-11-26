@@ -48,6 +48,8 @@ HOME_NEXT_UP_SEASON_LIMIT = 32
 HOME_NEXT_UP_EPISODE_SCAN_LIMIT = 128
 HOME_DEGRADED_CANDIDATE_LIMIT = 500
 HOME_RECENT_FILE_SAMPLE_LIMIT = 4096
+HOME_NEWLY_ADDED_SERIES_LIMIT = 18
+HOME_NEWLY_ADDED_BATCH_WINDOW_NS = 3_600_000_000_000
 HOME_STATE_RELATIONSHIP_SCAN_LIMIT = 2000
 HOME_DISCOVERY_CANDIDATE_LIMIT = 36
 
@@ -5264,6 +5266,8 @@ class Catalog:
         }
 
     def _newly_added_rows(self, library_id: str, entity_type: str) -> list[tuple]:
+        if entity_type == "episode":
+            return self._newly_added_episode_rows(library_id)
         if self._read_model_ready() and self._has_table("catalog_entity_summary"):
             return self.db.execute(
                 "SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
@@ -5283,6 +5287,61 @@ class Catalog:
             "WHERE e.library_id=? AND e.entity_type=? "
             "GROUP BY e.id ORDER BY MAX(f.modified_ns) DESC,e.id LIMIT 18",
             (HOME_RECENT_FILE_SAMPLE_LIMIT, library_id, entity_type),
+        )
+
+    def _newly_added_episode_rows(self, library_id: str) -> list[tuple]:
+        """Return the newest episode batch for each of the latest 18 series."""
+        columns = (
+            "e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,"
+            "e.episode_end_number,e.created_at,e.updated_at"
+        )
+        if self._read_model_ready() and self._has_table("catalog_entity_summary"):
+            episode_dates = (
+                f"SELECT {columns},"
+                "COALESCE(s.last_added_sort_ns,"
+                "s.media_last_added_ns,0) AS last_added_ns,"
+                "series_entity.id AS series_id "
+                "FROM catalog_entity_summary s "
+                "JOIN library_entities e ON e.id=s.entity_id "
+                "JOIN library_entities season ON season.id=e.parent_id "
+                "AND season.entity_type='season' "
+                "JOIN library_entities series_entity "
+                "ON series_entity.id=season.parent_id "
+                "AND series_entity.entity_type='series' "
+                "WHERE s.library_id=? AND s.entity_type='episode' "
+                "AND s.media_file_count>0"
+            )
+        else:
+            episode_dates = (
+                f"SELECT {columns},COALESCE(MAX(f.modified_ns),0) AS last_added_ns,"
+                "series_entity.id AS series_id "
+                "FROM media_files f "
+                "JOIN library_entities e ON e.id=f.entity_id "
+                "JOIN library_entities season ON season.id=e.parent_id "
+                "AND season.entity_type='season' "
+                "JOIN library_entities series_entity "
+                "ON series_entity.id=season.parent_id "
+                "AND series_entity.entity_type='series' "
+                "WHERE f.role='media' AND e.library_id=? AND e.entity_type='episode' "
+                "GROUP BY e.id"
+            )
+        return self.db.execute(
+            "WITH episode_dates AS (" + episode_dates + "), latest_series AS ("
+            "SELECT series_id,MAX(last_added_ns) AS latest_ns "
+            "FROM episode_dates GROUP BY series_id "
+            "ORDER BY latest_ns DESC,series_id LIMIT ?"
+            ") SELECT e.id,e.library_id,e.parent_id,e.entity_type,e.relative_path,"
+            "e.season_number,e.episode_number,"
+            "e.episode_end_number,e.created_at,e.updated_at "
+            "FROM episode_dates e JOIN latest_series s ON s.series_id=e.series_id "
+            "WHERE e.last_added_ns>=s.latest_ns-? "
+            "ORDER BY s.latest_ns DESC,s.series_id,e.last_added_ns DESC,e.id",
+            (
+                library_id,
+                HOME_NEWLY_ADDED_SERIES_LIMIT,
+                HOME_NEWLY_ADDED_BATCH_WINDOW_NS,
+            ),
         )
 
     @_catalog_read
@@ -5385,11 +5444,12 @@ class Catalog:
                     language=language,
                 )
             )
-        items.sort(
-            key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
-        )
-        items.sort(key=lambda value: value.get("lastAddedAt") or "", reverse=True)
-        items = items[:18]
+        if entity_type == "movie":
+            items.sort(
+                key=lambda value: (str(value.get("name") or "").casefold(), value["id"])
+            )
+            items.sort(key=lambda value: value.get("lastAddedAt") or "", reverse=True)
+            items = items[:18]
         if not items:
             return None
         return {

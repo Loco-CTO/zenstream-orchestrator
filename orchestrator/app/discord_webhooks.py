@@ -16,6 +16,7 @@ import httpx
 from app.config import Config
 from app.models.metadata import _fernet
 from cryptography.fernet import InvalidToken
+from sqlalchemy.exc import SQLAlchemyError
 
 EVENTS = {
     "user.login": "User signed in",
@@ -261,18 +262,41 @@ def finish_viewer(cursor, viewer_id, kind, **payload):
         publish(kind, cursor=cursor, **payload)
 
 
-def _entity(db, entity_id):
+def _metadata_projection_table(db):
     rows = db.read_execute(
-        "SELECT e.entity_type,e.parent_id,e.relative_path,e.season_number,e.episode_number,"
-        "(SELECT p.payload FROM catalog_metadata_projection p WHERE p.entity_id=e.id "
-        "ORDER BY (p.locale='en') DESC,p.locale LIMIT 1) FROM library_entities e WHERE e.id=?",
+        "SELECT name FROM sqlite_master WHERE type='table' "
+        "AND name IN ('catalog_item_projection','catalog_metadata_projection') "
+        "ORDER BY CASE name WHEN 'catalog_item_projection' THEN 0 ELSE 1 END LIMIT 1"
+    )
+    return rows[0][0] if rows else None
+
+
+def _entity(db, entity_id, projection_table):
+    rows = db.read_execute(
+        "SELECT entity_type,parent_id,relative_path,season_number,episode_number "
+        "FROM library_entities WHERE id=?",
         (entity_id,),
     )
     if not rows:
         return None
-    kind, parent, path, season, number, raw = rows[0]
+    kind, parent, path, season, number = rows[0]
+    projected = (
+        db.read_execute(
+            f"SELECT payload FROM {projection_table} WHERE entity_id=? "
+            "ORDER BY (locale='en') DESC,locale LIMIT 1",
+            (entity_id,),
+        )
+        if projection_table
+        else []
+    )
+    try:
+        payload = json.loads(projected[0][0] or "{}") if projected else {}
+    except ValueError:
+        payload = {}
     title = (
-        json.loads(raw or "{}").get("title") or Path(path or "").stem or kind.title()
+        (payload.get("title") if isinstance(payload, dict) else None)
+        or Path(path or "").stem
+        or kind.title()
     )
     return kind, parent, title, season, number
 
@@ -303,7 +327,8 @@ def _artwork(db, candidates):
 
 
 def _media(db, entity_id):
-    entity = _entity(db, entity_id)
+    projection_table = _metadata_projection_table(db)
+    entity = _entity(db, entity_id, projection_table)
     if entity is None:
         return "Media item", [], None
     kind, parent, title, season, number = entity
@@ -311,9 +336,12 @@ def _media(db, entity_id):
     candidates = [(entity_id, ("primary", "backdrop"))]
     if kind == "episode":
         candidates = [(entity_id, ("thumb", "primary", "backdrop"))]
-        parent_item = _entity(db, parent)
+        parent_item = _entity(db, parent, projection_table)
         if parent_item and parent_item[0] == "season":
-            parent, parent_item = parent_item[1], _entity(db, parent_item[1])
+            parent, parent_item = (
+                parent_item[1],
+                _entity(db, parent_item[1], projection_table),
+            )
         if parent_item and parent_item[0] == "series":
             fields.append(("Series", parent_item[2]))
             candidates.append((parent, ("primary", "backdrop")))
@@ -322,15 +350,15 @@ def _media(db, entity_id):
         if number is not None:
             fields.append(("Episode", str(number)))
     elif kind == "track":
-        album = _entity(db, parent)
+        album = _entity(db, parent, projection_table)
         if album and album[0] == "release":
             fields.append(("Album", album[2]))
             candidates.insert(0, (parent, ("primary",)))
-            artist = _entity(db, album[1])
+            artist = _entity(db, album[1], projection_table)
             if artist and artist[0] == "artist":
                 fields.append(("Artist", artist[2]))
     elif kind == "release":
-        artist = _entity(db, parent)
+        artist = _entity(db, parent, projection_table)
         if artist and artist[0] == "artist":
             fields.append(("Artist", artist[2]))
     return title, fields, _artwork(db, candidates)
@@ -382,8 +410,12 @@ def build_message(db, kind, payload, created):
     if entity_id := payload.get("entity"):
         try:
             media_title, media_fields, artwork = _media(db, entity_id)
-        except (sqlite3.OperationalError, ValueError):
-            media_title, media_fields = "Media item", []
+        except (sqlite3.Error, SQLAlchemyError, ValueError, TypeError) as error:
+            _LOG.warning(
+                "Could not load media details for Discord event error_type=%s",
+                type(error).__name__,
+            )
+            media_title, media_fields, artwork = "Media item", [], None
         description = f"{_MEDIA_COPY[kind]}\n{media_title}"
         fields += media_fields
     if kind == "user.login":

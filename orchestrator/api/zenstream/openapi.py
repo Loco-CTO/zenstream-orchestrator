@@ -637,6 +637,16 @@ class CatalogWatchlistStatus(DocsModel):
     )
 
 
+class CatalogArtistCredit(DocsModel):
+    name: str = Field(examples=["Example Artist"])
+    id: str | None = Field(
+        default=None,
+        examples=["artist-0001"],
+        description="Local catalog artist ID, present when the credit resolves to an artist in this library.",
+    )
+    joinPhrase: str | None = Field(default=None, examples=[" feat. "])
+
+
 class CatalogItem(DocsModel):
     id: str | None = Field(default=None, examples=["item-0001"])
     type: str | None = Field(default=None, examples=["movie"])
@@ -659,6 +669,10 @@ class CatalogItem(DocsModel):
     collectionYearRange: str | None = Field(default=None, examples=["2020-2025"])
     albumId: str | None = Field(default=None, examples=["release-0001"])
     artistId: str | None = Field(default=None, examples=["artist-0001"])
+    artistCredits: list[CatalogArtistCredit] | None = Field(
+        default=None,
+        description="Ordered album or track credits with local artist IDs for navigation.",
+    )
     discNumber: int | None = Field(default=None, examples=[1])
     trackNumber: int | None = Field(default=None, examples=[1])
     durationSeconds: float | None = Field(default=None, examples=[104.0])

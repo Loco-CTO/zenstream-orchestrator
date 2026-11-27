@@ -3339,6 +3339,37 @@ class CatalogTest(unittest.TestCase):
             "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
             ("artist-main", "musicbrainz", "artist", "mb-main", 1),
         )
+        credits = [
+            {"id": "mb-main", "name": "Main Artist", "joinPhrase": " feat. "},
+            {"id": "mb-feature", "name": "Feature Artist"},
+            {"id": "mb-hidden", "name": "Hidden Artist"},
+        ]
+        for entity, provider_type, provider_id in (
+            ("artist-feature", "artist", "mb-feature"),
+            ("artist-hidden", "artist", "mb-hidden"),
+            ("release-main", "release", "mb-release"),
+            ("track-main", "recording", "mb-recording"),
+        ):
+            self.db.execute(
+                "INSERT INTO entity_provider_ids VALUES(?,?,?,?,?)",
+                (entity, "musicbrainz", provider_type, provider_id, 1),
+            )
+        for entity_type, provider_id in (
+            ("release", "mb-release"),
+            ("track", "mb-recording"),
+        ):
+            self.db.execute(
+                "INSERT INTO metadata_cache VALUES(?,?,?,?,?,?,?)",
+                (
+                    "musicbrainz",
+                    entity_type,
+                    provider_id,
+                    "",
+                    json.dumps({"artists": credits, "_imageLanguageSchema": 3}),
+                    "now",
+                    "2099-01-01",
+                ),
+            )
         self.db.execute(
             "CREATE TABLE user_follow_targets(id TEXT PRIMARY KEY,user_id TEXT,library_id TEXT,target_type TEXT,provider TEXT,provider_id TEXT,entity_id TEXT,created_at TEXT,updated_at TEXT,UNIQUE(user_id,library_id,target_type,provider,provider_id))"
         )
@@ -3388,6 +3419,15 @@ class CatalogTest(unittest.TestCase):
             [value["id"] for value in provider_id_result["appearsIn"]],
             ["release-appears"],
         )
+        album = self.catalog().music_album_detail(account["id"], "release-main", "en")
+        local_credits = [
+            {"id": "artist-main", "name": "Main Artist", "joinPhrase": " feat. "},
+            {"id": "artist-feature", "name": "Feature Artist"},
+            {"name": "Hidden Artist"},
+        ]
+        self.assertEqual(album["album"]["artistCredits"], local_credits)
+        self.assertEqual(album["tracks"][0]["artistCredits"], local_credits)
+        self.assertEqual(album["album"]["metadata"]["artists"], credits)
 
 
 if __name__ == "__main__":

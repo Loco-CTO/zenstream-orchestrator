@@ -6,6 +6,8 @@ Watcher-targeted scans classify and remove only the selected top-level roots. A 
 
 If a candidate media path or traversal cannot be inspected, defer the whole affected root. Do not reject it or include it in missing-path or move cleanup. Watchdog events or the periodic full scan can retry later.
 
+Music artists with track credits can exist without artist directories. Missing-path cleanup retains them, then music orphan cleanup removes artists whose final credit and release are gone. The versioned music catalog repair reconstructs credits from indexed metadata. The missing metadata job uses MusicBrainz artist IDs from credits and searches for a unique name match for folderless artists without an ID. Client-facing album and track credits use the local artist ID for navigation.
+
 ## Reconcile and watcher behavior
 
 Target comparisons and root locks use platform-aware path normalization. A stale reconcile with no due targets completes without scanning or unscoped cleanup. Persist the first target immediately, batch repeated event counters and revisions, and flush before selection and shutdown.

@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from app.database import DatabaseHandler
 from app.library import LibraryScanner, LibraryStore
@@ -150,6 +152,39 @@ class MusicArtistCreditsTest(unittest.TestCase):
             )[0][0],
             2,
         )
+
+    def test_missing_path_prune_keeps_a_guest_until_the_last_track_is_removed(self):
+        album_artist, release, track = self._seed_track()
+        self._materialize(album_artist, release, track)
+        guest = self.scanner._music_artist_entities["guest artist"]
+        self.scanner._scan_complete = True
+        self.scanner._scan_seen_ids.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            album = root / "Album"
+            album.mkdir()
+            audio = album / "01 - Track.mp3"
+            audio.touch()
+            self.assertEqual(
+                self.scanner._prune_missing_entities("library-1", root), set()
+            )
+            self.assertEqual(
+                len(
+                    self.db.execute(
+                        "SELECT track_id FROM music_artist_credits WHERE artist_id=?",
+                        (guest,),
+                    )
+                ),
+                1,
+            )
+            audio.unlink()
+            self.assertEqual(
+                self.scanner._prune_missing_entities("library-1", root), {track}
+            )
+            self.scanner._remove_orphan_music_artists("library-1")
+            self.assertFalse(
+                self.db.execute("SELECT id FROM library_entities WHERE id=?", (guest,))
+            )
 
     def test_provider_id_later_attaches_to_existing_local_artist(self):
         album_artist, release, track = self._seed_track()

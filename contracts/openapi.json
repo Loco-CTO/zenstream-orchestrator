@@ -1997,6 +1997,54 @@
         "title": "CalendarSettingsUpdate",
         "type": "object"
       },
+      "CatalogArtistCredit": {
+        "additionalProperties": true,
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Local catalog artist ID, present when the credit resolves to an artist in this library.",
+            "examples": [
+              "artist-0001"
+            ],
+            "title": "Id"
+          },
+          "joinPhrase": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "examples": [
+              " feat. "
+            ],
+            "title": "Joinphrase"
+          },
+          "name": {
+            "examples": [
+              "Example Artist"
+            ],
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CatalogArtistCredit",
+        "type": "object"
+      },
       "CatalogArtwork": {
         "additionalProperties": true,
         "properties": {
@@ -2427,6 +2475,22 @@
               "release-0001"
             ],
             "title": "Albumid"
+          },
+          "artistCredits": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/CatalogArtistCredit"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Ordered album or track credits with local artist IDs for navigation.",
+            "title": "Artistcredits"
           },
           "artistId": {
             "anyOf": [

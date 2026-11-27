@@ -55,7 +55,9 @@ class CandidateFirstWorkflowTest(unittest.TestCase):
         gate = job_block(coverage, "coverage")
         self.assertIn("needs: [test-coverage, docker-smoke]", gate)
         self.assertIn("if: always()", gate)
-        self.assertIn('test "$TEST_RESULT" = success && test "$DOCKER_RESULT" = success', gate)
+        self.assertIn(
+            'test "$TEST_RESULT" = success && test "$DOCKER_RESULT" = success', gate
+        )
         self.assertIn("python -m coverage run", job_block(coverage, "test-coverage"))
         docker = job_block(coverage, "docker-smoke")
         self.assertRegex(docker, r"ref:.*inputs\.candidate_sha")

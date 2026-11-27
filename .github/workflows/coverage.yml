@@ -28,6 +28,17 @@ concurrency:
 
 jobs:
   coverage:
+    needs: [test-coverage, docker-smoke]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require both coverage and production image checks
+        env:
+          TEST_RESULT: ${{ needs.test-coverage.result }}
+          DOCKER_RESULT: ${{ needs.docker-smoke.result }}
+        run: test "$TEST_RESULT" = success && test "$DOCKER_RESULT" = success
+
+  test-coverage:
     runs-on: ubuntu-latest
     env:
       PYTHONPATH: orchestrator
@@ -84,9 +95,6 @@ jobs:
         working-directory: launcher
         run: npm run test:coverage
 
-      - name: Smoke production Docker Compose image
-        run: bash ./scripts/smoke-docker.sh
-
       - name: Install DeepSource CLI
         if: ${{ !inputs.skip_coverage_upload }}
         run: curl -fsSL https://cli.deepsource.com/install | BINDIR=./bin sh
@@ -98,3 +106,20 @@ jobs:
       - name: Upload launcher JavaScript coverage
         if: ${{ !inputs.skip_coverage_upload }}
         run: ./bin/deepsource report --analyzer test-coverage --key javascript --value-file launcher/coverage/lcov.info --use-oidc
+
+  docker-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.candidate_sha || github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify candidate checkout
+        if: inputs.candidate_sha != ''
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+
+      - name: Smoke production Docker Compose image
+        run: bash ./scripts/smoke-docker.sh

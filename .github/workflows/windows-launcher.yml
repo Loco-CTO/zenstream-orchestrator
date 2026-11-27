@@ -13,6 +13,7 @@ name: Windows launcher
       - "scripts/build-windows.ps1"
       - "scripts/pack-windows.ps1"
       - "scripts/smoke-windows-backend.mjs"
+      - "scripts/test-windows-runtime.ps1"
       - "orchestrator/**"
       - "frontend/**"
       - "requirements.txt"
@@ -57,10 +58,7 @@ jobs:
           cache-dependency-path: requirements.txt
       - name: Verify native Windows runtime regressions
         shell: pwsh
-        run: |
-          python -m pip install --disable-pip-version-check watchdog uvicorn python-dotenv
-          $env:PYTHONPATH = "orchestrator"
-          python -m unittest orchestrator.test.windows_watchdog_test orchestrator.test.launcher_test
+        run: ./scripts/test-windows-runtime.ps1
       - name: Build Windows launcher and installer artifacts
         shell: pwsh
         run: ./scripts/build-windows.ps1 -PythonExecutable python

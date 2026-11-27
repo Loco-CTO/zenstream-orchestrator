@@ -3404,13 +3404,10 @@ class MetadataMissingJob:
                         # A cache hit is normally replayed locally. A missing
                         # provider title or stale document with gaps is a
                         # reason to check the provider before replaying it.
-                        if (
-                            stale
-                            or (
-                                provider == "tvdb"
-                                and entity_type == "season"
-                                and not _usable_metadata_value(cached.get("title"))
-                            )
+                        if stale or (
+                            provider == "tvdb"
+                            and entity_type == "season"
+                            and not _usable_metadata_value(cached.get("title"))
                         ):
                             fetch_locales.append(locale)
                         else:

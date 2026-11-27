@@ -2311,7 +2311,9 @@ class MetadataServicesTest(unittest.TestCase):
                     "VALUES(?,?,?,?,'completed',3)",
                     (provider, entity_type, "10", locale),
                 )
-                image_ingest = MetadataImageIngestService(_ImageCache(self.db), directory)
+                image_ingest = MetadataImageIngestService(
+                    _ImageCache(self.db), directory
+                )
                 with patch.object(
                     image_ingest, "_download", side_effect=OSError("offline")
                 ):

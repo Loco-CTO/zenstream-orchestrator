@@ -350,7 +350,9 @@ class MetadataRefreshJob:
             return False
         reader = MetadataReadService(self.db)
         for locale in locales:
-            raw = reader.resolve_raw(entity_type, identities, locale, entity_id=entity_id)
+            raw = reader.resolve_raw(
+                entity_type, identities, locale, entity_id=entity_id
+            )
             if not reader.ready_artwork(
                 entity_type,
                 identities,

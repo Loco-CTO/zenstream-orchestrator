@@ -25,6 +25,7 @@ StorageCategory = Literal[
 logger = get_logger("storage")
 _CACHE_SECONDS = 60
 _REFRESH_INTERVAL_SECONDS = 5
+_MOUNT_POINT_TAG = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
 
 
 class StorageUsage(BaseModel):
@@ -105,8 +106,9 @@ class _StorageWalk:
                             usage.unreadablePaths += 1
                             continue
                         if (
-                            getattr(info, "st_reparse_tag", 0)
-                            == stat.IO_REPARSE_TAG_MOUNT_POINT
+                            _MOUNT_POINT_TAG is not None
+                            and getattr(info, "st_reparse_tag", None)
+                            == _MOUNT_POINT_TAG
                         ):
                             continue
                         if stat.S_ISDIR(info.st_mode):

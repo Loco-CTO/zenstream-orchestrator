@@ -23,7 +23,7 @@ from app.library import (
 from app.library import runtime as library_runtime
 from app.library_cleanup import cleanup_orphans
 from app.logging_config import get_logger
-from app.metadata_domain import choose_artwork, language_family
+from app.metadata_domain import choose_artwork, language_family, rank_artwork_candidates
 from app.metadata_refresh import MetadataRefreshJob
 from app.metadata_services import (
     FACT_FIELDS,
@@ -539,19 +539,6 @@ def _metadata_document_gaps(
         "ids",
     }
     prefer_no_language_for_backdrop = _prefer_no_language_for_backdrop()
-    source_images = set()
-    for image_type in ARTWORK_TYPES:
-        expected = choose_artwork(
-            document.get("images", []),
-            locale,
-            image_type,
-            document.get("originalLanguage"),
-            [provider],
-            include_english=_english_configured(),
-            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
-        )
-        if expected and expected.get("url"):
-            source_images.add((image_type, str(expected["url"])))
     image_columns = {row[1] for row in db.execute("PRAGMA table_info(metadata_images)")}
     blur_hash_column = ",blur_hash" if "blur_hash" in image_columns else ""
     image_rows = db.execute(
@@ -569,8 +556,30 @@ def _metadata_document_gaps(
         for row in image_rows
         if len(row) > 3 and _ready_cache_path(row[2]) and row[3]
     }
-    for image_type, image_url in source_images - ready_images:
-        gaps.add(f"artwork:{image_type}")
+    expected_artwork = {}
+    for image_type in ARTWORK_TYPES:
+        candidates = rank_artwork_candidates(
+            document.get("images", []),
+            locale,
+            image_type,
+            document.get("originalLanguage"),
+            [provider],
+            include_english=_english_configured(),
+            prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
+        )
+        if not candidates:
+            continue
+        ready = next(
+            (
+                candidate
+                for candidate in candidates
+                if (image_type, candidate["url"]) in ready_images
+            ),
+            None,
+        )
+        expected_artwork[image_type] = ready or candidates[0]
+        if ready is None:
+            gaps.add(f"artwork:{image_type}")
 
     expected_credit_records = []
     credits = document.get("credits")
@@ -660,22 +669,11 @@ def _metadata_document_gaps(
         projected_images = projection.get("images")
         if not isinstance(projected_images, dict):
             projected_images = {}
-        for image_type in ARTWORK_TYPES:
-            expected = choose_artwork(
-                document.get("images", []),
-                locale,
-                image_type,
-                document.get("originalLanguage"),
-                [provider],
-                include_english=_english_configured(),
-                prefer_no_language_for_backdrop=prefer_no_language_for_backdrop,
-            )
-            if expected and image_type not in projected_images:
+        for image_type, expected in expected_artwork.items():
+            if image_type not in projected_images:
                 gaps.add(f"projection-artwork:{image_type}")
             elif (
-                expected
-                and image_type != "Logo"
-                and image_type in projected_images
+                image_type != "Logo"
                 and ready_hashes.get((image_type, str(expected.get("url"))))
                 and not str(
                     (
@@ -2642,7 +2640,6 @@ class MetadataMissingJob:
         upgrade_state = (
             _load_metadata_upgrade_state(self.db) if upgrade_state_enabled else {}
         )
-        _repair_missing_tv_child_identities(self.db, ingest.metadata_service)
         if operation == "metadata_missing":
             identity_failures, identity_incomplete = (
                 self._recover_missing_primary_entities(run_id, should_terminate)
@@ -3390,7 +3387,7 @@ class MetadataMissingJob:
                         fetch_locales.append(locale)
                         continue
                     cached = dict(cached)
-                    cached.pop("_stale", None)
+                    stale = cached.pop("_stale", False)
                     documents[locale] = cached
                     if force:
                         fetch_locales.append(locale)
@@ -3405,10 +3402,9 @@ class MetadataMissingJob:
                     )
                     if gaps:
                         # A cache hit is normally replayed locally. A missing
-                        # provider title is different: replaying the same
-                        # normalized document can never repair it, so request
-                        # a fresh localized document instead.
-                        if (
+                        # provider title or stale document with gaps is a
+                        # reason to check the provider before replaying it.
+                        if stale or (
                             provider == "tvdb"
                             and entity_type == "season"
                             and not _usable_metadata_value(cached.get("title"))

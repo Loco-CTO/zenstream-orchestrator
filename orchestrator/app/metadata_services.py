@@ -1992,7 +1992,10 @@ class MetadataReadService:
                     value = json.loads(encoded)
                 except (TypeError, json.JSONDecodeError):
                     continue
-                if value.get("_imageLanguageSchema") == IMAGE_LANGUAGE_SCHEMA:
+                if (
+                    isinstance(value, dict)
+                    and value.get("_imageLanguageSchema") == IMAGE_LANGUAGE_SCHEMA
+                ):
                     if provider == "lastfm":
                         value = _sanitize_lastfm_payload(value)
                     payloads.setdefault((provider, locale), value)
@@ -3177,6 +3180,10 @@ class MetadataIngestService:
                     f"MusicBrainz {entity_type} {provider_id} returned no metadata document"
                 )
             values = {locale: copy.deepcopy(normalized) for locale in locales}
+        elif any(not isinstance(values.get(locale), dict) for locale in locales):
+            raise ValueError(
+                f"{provider} {entity_type} {provider_id} returned incomplete localized metadata"
+            )
 
         if len(locales) == 1 and not neutral:
             locale = locales[0]
@@ -3945,6 +3952,7 @@ class MetadataImageIngestService:
         ready = failed = skipped = 0
         outcomes: dict[str, str] = {}
         preserved: dict[str, set[str]] = {}
+        retry_locales: set[str] = set()
         prefer_no_language_for_backdrop = (
             MetadataLanguageSettings().prefer_no_language_for_backdrop()
         )
@@ -3970,6 +3978,7 @@ class MetadataImageIngestService:
                 had_ready = self._has_ready_category(
                     provider, entity_type, provider_id, image_type, locale
                 )
+                download_failed = False
                 for candidate in candidates[:2]:
                     url = candidate.get("url")
                     if not isinstance(url, str):
@@ -3979,6 +3988,7 @@ class MetadataImageIngestService:
                         continue
                     outcome = outcomes.get(url)
                     if outcome == "failed":
+                        download_failed = True
                         if candidate is candidates[0] and had_ready:
                             preserved.setdefault(locale, set()).add(image_type)
                         continue
@@ -4026,6 +4036,7 @@ class MetadataImageIngestService:
                         outcomes[url] = "ready"
                         break
                     except Exception as error:
+                        download_failed = True
                         outcomes[url] = "failed"
                         failed += 1
                         if candidate is candidates[0] and had_ready:
@@ -4040,6 +4051,9 @@ class MetadataImageIngestService:
                             url,
                             error,
                         )
+                else:
+                    if download_failed:
+                        retry_locales.add(locale)
                 # A failed preferred candidate may have a ready fallback, but
                 # never fan out through the full provider candidate list.
 
@@ -4084,7 +4098,49 @@ class MetadataImageIngestService:
             self._prune_replaced(
                 provider, entity_type, provider_id, documents, outcomes
             )
+        if retry_locales:
+            self._queue_artwork_recovery(
+                provider, entity_type, provider_id, retry_locales
+            )
         return {"ready": ready, "failed": failed, "skipped": skipped}
+
+    def _queue_artwork_recovery(
+        self, provider: str, entity_type: str, provider_id: str, locales: set[str]
+    ) -> None:
+        if provider not in {"tmdb", "tvdb", "musicbrainz", "lastfm"}:
+            return
+        if not self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata_missing_state'"
+        ):
+            return
+        if provider == "musicbrainz":
+            if entity_type in MUSICBRAINZ_NEUTRAL_ENTITY_TYPES:
+                locales = {""}
+            if entity_type == "recording":
+                entity_type = "track"
+        timestamp = iso_now()
+        with self.db.transaction() as cursor:
+            cursor.executemany(
+                "INSERT INTO metadata_missing_state("
+                "provider,entity_type,provider_id,locale,state,attempts,error,created_at,updated_at"
+                ") VALUES(?,?,?,?,'queued',0,?,?,?) "
+                "ON CONFLICT(provider,entity_type,provider_id,locale) DO UPDATE SET "
+                "state='queued',attempts=0,next_attempt_at=NULL,source_job_id=NULL,"
+                "error=excluded.error,updated_at=excluded.updated_at "
+                "WHERE metadata_missing_state.state='completed'",
+                [
+                    (
+                        provider,
+                        entity_type,
+                        provider_id,
+                        locale,
+                        "Provider artwork could not be downloaded",
+                        timestamp,
+                        timestamp,
+                    )
+                    for locale in sorted(locales)
+                ],
+            )
 
     def ingest(
         self,

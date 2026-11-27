@@ -10,8 +10,24 @@ from app.providers import (
     MusicBrainzClient,
     ProviderClient,
     ProviderError,
+    TMDBClient,
     _select_music_match,
 )
+
+
+class TMDBArtworkTest(unittest.TestCase):
+    def test_uses_detail_poster_when_appended_posters_are_missing(self):
+        client = object.__new__(TMDBClient)
+        for entity_type in ("movie", "series", "season", "collection"):
+            with self.subTest(entity_type=entity_type):
+                images = client._images(
+                    entity_type,
+                    {"poster_path": "/default.jpg", "images": {"posters": []}},
+                )
+                self.assertEqual(
+                    [(image["type"], image["url"]) for image in images],
+                    [("Primary", "https://image.tmdb.org/t/p/w1280/default.jpg")],
+                )
 
 
 class MusicBrainzLookupTest(unittest.TestCase):

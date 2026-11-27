@@ -2287,6 +2287,61 @@ class MetadataServicesTest(unittest.TestCase):
         self.assertEqual(downloads, ["https://images.example/shared.jpg"])
         self.assertEqual(len(cache.rows), 2)
 
+    def test_image_download_failure_requeues_completed_video_and_music_metadata(self):
+        self.db.execute(
+            "CREATE TABLE metadata_missing_state("
+            "provider TEXT,entity_type TEXT,provider_id TEXT,locale TEXT,"
+            "state TEXT,attempts INTEGER,next_attempt_at TEXT,source_job_id TEXT,"
+            "error TEXT,created_at TEXT,updated_at TEXT,"
+            "PRIMARY KEY(provider,entity_type,provider_id,locale))"
+        )
+        for provider, entity_type, locale in (
+            ("tmdb", "movie", "en"),
+            ("tvdb", "episode", "en"),
+            ("musicbrainz", "release", ""),
+            ("lastfm", "track", "en"),
+        ):
+            with (
+                self.subTest(provider=provider),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                self.db.execute(
+                    "INSERT INTO metadata_missing_state("
+                    "provider,entity_type,provider_id,locale,state,attempts) "
+                    "VALUES(?,?,?,?,'completed',3)",
+                    (provider, entity_type, "10", locale),
+                )
+                image_ingest = MetadataImageIngestService(
+                    _ImageCache(self.db), directory
+                )
+                with patch.object(
+                    image_ingest, "_download", side_effect=OSError("offline")
+                ):
+                    result = image_ingest.ingest(
+                        provider,
+                        entity_type,
+                        "10",
+                        locale,
+                        {
+                            "images": [
+                                {
+                                    "type": "Primary",
+                                    "url": "https://images.example/poster.jpg",
+                                }
+                            ]
+                        },
+                        project=False,
+                    )
+                self.assertEqual(result["failed"], 1)
+                self.assertEqual(
+                    self.db.execute(
+                        "SELECT state,attempts FROM metadata_missing_state "
+                        "WHERE provider=? AND entity_type=? AND provider_id=? AND locale=?",
+                        (provider, entity_type, "10", locale),
+                    ),
+                    [("queued", 0)],
+                )
+
     def test_image_ingest_tries_only_one_native_fallback_after_winner_failure(self):
         cache = _ImageCache(self.db)
         downloads = []

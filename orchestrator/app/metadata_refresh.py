@@ -12,6 +12,7 @@ from app.library import JobTerminated
 from app.logging_config import get_logger
 from app.metadata_services import (
     MetadataIngestService,
+    MetadataReadService,
     asset_executor,
     metadata_task_results,
 )
@@ -333,33 +334,36 @@ class MetadataRefreshJob:
         if "catalog_artwork_selection" in self._table_names():
             placeholders = ",".join("?" for _ in locales)
             rows = self.db.execute(
-                "SELECT local_path FROM catalog_artwork_selection WHERE entity_id=? "
+                "SELECT locale,provider,local_path FROM catalog_artwork_selection WHERE entity_id=? "
                 "AND image_type=? AND locale IN (" + placeholders + ")",
                 [entity_id, image_type, *locales],
             )
-            if any(_ready_path(row[0]) for row in rows):
+            selected_locales = {
+                locale
+                for locale, provider, path in rows
+                if provider != "screen_extractor" and _ready_path(path)
+            }
+            locales = [locale for locale in locales if locale not in selected_locales]
+            if not locales:
                 return True
-        if "metadata_images" not in self._table_names():
+        if not {"metadata_images", "metadata_cache"} <= self._table_names():
             return False
-        image_locales = list(dict.fromkeys([*locales, ""]))
-        for identity in identities:
-            placeholders = ",".join("?" for _ in image_locales)
-            rows = self.db.execute(
-                "SELECT local_path FROM metadata_images WHERE provider=? AND entity_type=? "
-                "AND provider_id=? AND image_type=? AND locale IN ("
-                + placeholders
-                + ")",
-                [
-                    identity["provider"],
-                    entity_type,
-                    identity["id"],
-                    image_type,
-                    *image_locales,
-                ],
+        reader = MetadataReadService(self.db)
+        for locale in locales:
+            raw = reader.resolve_raw(
+                entity_type, identities, locale, entity_id=entity_id
             )
-            if any(_ready_path(row[0]) for row in rows):
-                return True
-        return False
+            if not reader.ready_artwork(
+                entity_type,
+                identities,
+                raw.get("images", []),
+                locale,
+                image_type,
+                raw.get("originalLanguage"),
+                reader.providers(entity_type),
+            ):
+                return False
+        return True
 
     def _artwork_bucket_due(
         self,

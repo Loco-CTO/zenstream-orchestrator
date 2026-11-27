@@ -1,7 +1,9 @@
 import copy
 import json
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 from app.database import DatabaseHandler
@@ -107,6 +109,28 @@ class MetadataRefreshSelectionTest(unittest.TestCase):
             {candidate["entity"]["type"] for candidate in candidates},
             {"movie", "series", "season", "episode"},
         )
+
+    def test_ready_poster_in_one_locale_does_not_cover_a_generated_frame(self):
+        self.db.execute(
+            "CREATE TABLE catalog_artwork_selection("
+            "entity_id TEXT, locale TEXT, image_type TEXT, provider TEXT, local_path TEXT)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            image = Path(directory) / "artwork.webp"
+            image.write_bytes(b"artwork")
+            for locale, provider in (("en", "tmdb"), ("ja", "screen_extractor")):
+                self.db.execute(
+                    "INSERT INTO catalog_artwork_selection VALUES(?,?,?,?,?)",
+                    ("movie", locale, "Primary", provider, str(image)),
+                )
+            self.assertTrue(
+                self.job._artwork_available("movie", "movie", [], ["en"], "Primary")
+            )
+            self.assertFalse(
+                self.job._artwork_available(
+                    "movie", "movie", [], ["en", "ja"], "Primary"
+                )
+            )
 
     def test_requires_relevant_cache_bucket_to_be_old(self):
         settings = self.settings()

@@ -338,9 +338,12 @@ def _sweep_metadata_cache_files(
     """Remove old crash leftovers and unregistered metadata image files."""
     if "metadata_images" not in tables or not db.db_file:
         return True
-    root = (Path(db.db_file).parent / "metadata-cache" / "images").resolve()
+    # Use the writer's path spelling for SQLite lookups. On Windows, resolve()
+    # can change directory casing even when it points to the same file.
+    root = Path(db.db_file).parent / "metadata-cache" / "images"
     if not root.is_dir():
         return True
+    resolved_root = root.resolve()
 
     cutoff = time.time() - grace_seconds
     candidates = {}
@@ -352,10 +355,11 @@ def _sweep_metadata_cache_files(
         try:
             if path.stat().st_mtime > cutoff:
                 continue
-            path.resolve().relative_to(root)
+            resolved = path.resolve()
+            resolved.relative_to(resolved_root)
         except (OSError, ValueError):
             continue
-        candidates[str(path)] = path.resolve()
+        candidates[str(path)] = resolved
 
     referenced, complete = _referenced_paths(
         db,
@@ -479,9 +483,10 @@ def _sweep_screen_extractor_cache(
 ) -> bool:
     if "screen_extractor_assets" not in tables or not db.db_file:
         return True
-    root = (Path(db.db_file).parent / "screen-extractor-cache").resolve()
+    root = Path(db.db_file).parent / "screen-extractor-cache"
     if not root.is_dir():
         return True
+    resolved_root = root.resolve()
     cutoff = time.time() - grace_seconds
     candidates = {}
     for path in root.rglob("*.webp"):
@@ -489,7 +494,7 @@ def _sweep_screen_extractor_cache(
             return False
         try:
             resolved = path.resolve()
-            resolved.relative_to(root)
+            resolved.relative_to(resolved_root)
             if path.stat().st_mtime > cutoff:
                 continue
         except (OSError, ValueError):

@@ -2012,6 +2012,8 @@ class LibraryScanner:
                 if concurrent_reconcile
                 else self._prune_missing_entities(library_id, root, targets=targets)
             )
+            if library["type"] == "music" and not concurrent_reconcile:
+                self._remove_orphan_music_artists(library_id)
             self._set_stage(job_id, "Refreshing catalog read model")
             removed = rejected | missing
             bazarr_mapping_changed = bool(
@@ -2263,10 +2265,20 @@ class LibraryScanner:
             except Exception:
                 root = None
                 legacy_without_library_root = True
-        rows = self.db.execute(
-            "SELECT id,relative_path FROM library_entities WHERE library_id=?",
-            (library_id,),
+        query = (
+            "SELECT id,relative_path FROM library_entities entity WHERE library_id=?"
         )
+        if self._has_table("music_artist_credits"):
+            # Credit-only artists have no filesystem path. Music orphan cleanup
+            # runs after inventory cleanup, when removed tracks no longer count.
+            query += (
+                " AND (entity_type<>'artist' OR NOT EXISTS ("
+                "SELECT 1 FROM music_artist_credits credit "
+                "JOIN library_entities track ON track.id=credit.track_id "
+                "WHERE credit.artist_id=entity.id AND track.library_id=entity.library_id "
+                "AND track.entity_type='track'))"
+            )
+        rows = self.db.execute(query, (library_id,))
         missing = []
         normalized_targets = {_top_level_key(target) for target in (targets or set())}
         if targets is not None and not normalized_targets:
@@ -8366,6 +8378,7 @@ class LibraryScanner:
         should_terminate: Callable[[], bool],
         *,
         resolve_provider_metadata: bool = True,
+        defer_publication: bool = False,
     ) -> None:
         """Materialize every credited artist and rewrite this group's links."""
         if not self._has_table("music_artist_credits"):
@@ -8566,8 +8579,10 @@ class LibraryScanner:
 
         for entity in changed_artist_ids:
             self._scan_refresh_root_ids.add(entity)
-            self._publish_root(entity)
-        self._flush_publications()
+            if not defer_publication:
+                self._publish_root(entity)
+        if not defer_publication:
+            self._flush_publications()
 
     def _music_document(self, entity_id: str, entity_type: str) -> dict:
         """Read one cached/projected music document without contacting a provider."""
@@ -8886,10 +8901,14 @@ class LibraryScanner:
         repaired = 0
         affected_libraries: set[str] = set()
         affected_artist_roots: set[str] = set()
+        current_library_id = None
         for release_id, library_id, album_artist_id in release_rows:
             self._check_termination(should_terminate)
             release_id = str(release_id)
             library_id = str(library_id)
+            if library_id != current_library_id:
+                self._music_artist_entities.clear()
+                current_library_id = library_id
             old_album_artist_id = str(album_artist_id)
             release_document = self._music_document(release_id, "release")
             artist_document = self._music_document(old_album_artist_id, "artist")
@@ -9091,11 +9110,12 @@ class LibraryScanner:
                 job_id,
                 should_terminate,
                 resolve_provider_metadata=False,
+                defer_publication=True,
             )
             repaired += 1
         for library_id in affected_libraries:
             self._remove_orphan_music_artists(library_id)
-        for root_id in affected_artist_roots:
+        for root_id in affected_artist_roots | self._scan_refresh_root_ids:
             if self.db.execute(
                 "SELECT 1 FROM library_entities WHERE id=? AND entity_type='artist'",
                 (root_id,),
@@ -10375,7 +10395,6 @@ class LibraryScanner:
         scan_check_termination()
         drain_pending(publish=True, all_pending=True)
         self._flush_music_inventory_writes()
-        self._remove_orphan_music_artists(library_id)
         self._music_inventory_prune(
             library_id,
             current_inventory_paths,

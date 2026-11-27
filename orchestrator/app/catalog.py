@@ -290,6 +290,9 @@ class _CatalogReadContext:
         self.series_primary_images: dict[tuple[str, str], dict | None] = {}
         self.series_metadata: dict[tuple[str, str], dict | None] = {}
         self.audio_fields: dict[str, tuple[int | None, int | None, float]] = {}
+        self.music_artist_links: dict[
+            str, tuple[dict[str, str], dict[str, str | None]]
+        ] = {}
         self.collection_year_ranges: dict[tuple[str, str], str | None] = {}
         self.collection_year_ranges_loaded: set[str] = set()
         self.metadata_service = MetadataReadService(catalog.db)
@@ -2697,6 +2700,53 @@ class Catalog:
             return None
         return _sanitize_projected_lastfm(value)
 
+    def _music_artist_link_ids(
+        self, user_id: str, library_id: str
+    ) -> tuple[dict[str, str], dict[str, str | None]]:
+        context = self._context(user_id)
+        if context is not None and library_id in context.music_artist_links:
+            return context.music_artist_links[library_id]
+        rows = self.db.execute(
+            "SELECT artist.id,artist.relative_path,identity.provider_id "
+            "FROM library_entities artist LEFT JOIN entity_provider_ids identity "
+            "ON identity.entity_id=artist.id AND identity.provider='musicbrainz' "
+            "AND identity.identifier_type='artist' "
+            "WHERE artist.library_id=? AND artist.entity_type='artist' ORDER BY artist.id",
+            (library_id,),
+        )
+        ids = {artist_id: artist_id for artist_id, _, _ in rows}
+        names: dict[str, str | None] = {}
+        for artist_id, name, provider_id in rows:
+            if provider_id:
+                ids.setdefault(provider_id, artist_id)
+            if name:
+                key = name.strip().casefold()
+                if names.setdefault(key, artist_id) != artist_id:
+                    names[key] = None
+        if context is not None:
+            context.music_artist_links[library_id] = ids, names
+        return ids, names
+
+    def _catalog_music_artist_credits(
+        self, user_id: str, library_id: str, metadata: dict
+    ) -> list[dict]:
+        from app.library import LibraryScanner
+
+        credits = LibraryScanner._music_document_credits(metadata)
+        if not credits:
+            return []
+        ids, names = self._music_artist_link_ids(user_id, library_id)
+        for credit in credits:
+            source_id = credit.pop("id", None)
+            artist_id = (
+                ids.get(source_id)
+                if source_id
+                else names.get(credit["name"].casefold())
+            )
+            if artist_id:
+                credit["id"] = artist_id
+        return credits
+
     def _serialize(
         self,
         user_id: str,
@@ -2820,6 +2870,10 @@ class Catalog:
             )
         elif row[3] == "release":
             value.update({"albumId": album_id, "artistId": artist_id})
+        if row[3] in {"release", "track"}:
+            value["artistCredits"] = self._catalog_music_artist_credits(
+                user_id, row[1], metadata
+            )
         if row[3] == "collection":
             value["collectionYearRange"] = self._collection_year_range(
                 user_id, row[0], language

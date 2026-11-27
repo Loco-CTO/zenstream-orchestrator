@@ -229,6 +229,47 @@ class MetadataMissingInspectionTest(unittest.TestCase):
         path.write_bytes(b"webp")
         return str(path)
 
+    def test_credit_only_artist_search_keeps_local_identity_and_rejects_ambiguity(self):
+        self.db.execute("ALTER TABLE library_entities ADD COLUMN parent_id TEXT")
+        self.db.execute(
+            "INSERT INTO library_entities(id,library_id,entity_type) VALUES"
+            "('guest','library-1','artist'),('ambiguous','library-1','artist')"
+        )
+        self.db.execute("CREATE TABLE music_artist_credits(track_id,artist_id)")
+        self.db.execute(
+            "INSERT INTO music_artist_credits VALUES('track','guest'),('track','ambiguous')"
+        )
+        job = MetadataMissingJob(MagicMock(db=self.db))
+        service = MagicMock()
+        service.client.return_value.search.side_effect = [
+            [{"title": "Guest Artist", "providerId": "mb-guest"}],
+            [
+                {"title": "Same Name", "providerId": "mb-1"},
+                {"title": "Same Name", "providerId": "mb-2"},
+            ],
+        ]
+        remaining, incomplete = job._recover_credit_only_artist_identities(
+            [
+                ("guest", "library-1", "Music", "artist", "Guest Artist", None),
+                ("ambiguous", "library-1", "Music", "artist", "Same Name", None),
+            ],
+            service,
+            "run-1",
+            lambda: False,
+        )
+        self.assertEqual(remaining, [])
+        self.assertEqual([item["name"] for item in incomplete], ["Same Name"])
+        self.assertEqual(
+            self.db.execute(
+                "SELECT entity_id,provider_id FROM entity_provider_ids WHERE provider='musicbrainz'"
+            ),
+            [("guest", "mb-guest")],
+        )
+        self.assertEqual(
+            self.db.execute("SELECT provider_id,state FROM metadata_missing_state"),
+            [("ambiguous", "retry")],
+        )
+
     def test_finds_partial_fields_and_each_missing_artwork_type(self):
         primary_path = self._ready_file("primary.webp")
         self.db.execute(
@@ -1740,6 +1781,40 @@ class JobMappingTest(unittest.TestCase):
             self.assertEqual(cleanup["intervalMinutes"], 10080)
         finally:
             db.close()
+
+    def test_completed_old_music_repair_queues_one_credit_backfill(self):
+        db, store = self._scheduler_store()
+        self.addCleanup(db.close)
+        old = store.ensure(
+            "music_catalog_repair",
+            "Repair music catalog identities",
+            "",
+            "music_catalog_repair",
+            config={"repairVersion": 1},
+            enabled=False,
+        )
+        db.execute(
+            "UPDATE job_definitions SET last_run_at='2026-01-01',last_state='completed' WHERE id=?",
+            (old["id"],),
+        )
+        store.ensure_defaults()
+        self.assertEqual(
+            store.by_key("music_catalog_repair")["config"],
+            {"repairVersion": 2, "repairInventory": False},
+        )
+
+        scheduler = JobScheduler.__new__(JobScheduler)
+        scheduler.store = store
+        with patch.object(store, "due_triggers", return_value=[]):
+            scheduler._schedule_due()
+            scheduler._schedule_due()
+            runs = store.runs(old["id"])
+            self.assertEqual([run["state"] for run in runs], ["queued"])
+            self.assertIsNone(store.by_key("music_catalog_repair")["nextRunAt"])
+            store.update_run(runs[0]["id"], state="completed")
+            store.ensure_defaults()
+            scheduler._schedule_due()
+            self.assertEqual(len(store.runs(old["id"])), 1)
 
     def test_default_metadata_refresh_is_available_without_a_schedule(self):
         db, store = self._scheduler_store()

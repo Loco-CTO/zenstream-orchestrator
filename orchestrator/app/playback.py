@@ -8,7 +8,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -38,6 +37,7 @@ from app.models.playback_access_lease import (
 )
 from app.models.playback_settings import PlaybackSettings
 from app.models.playback_viewer import PlaybackViewerStore
+from app.paths import transcode_directory
 from fastapi import HTTPException
 
 logger = get_logger("playback")
@@ -1332,7 +1332,7 @@ class PlaybackManager:
                 )
 
             session_id = str(uuid.uuid4())
-            output = Path(tempfile.gettempdir()) / "zenstream-transcodes" / session_id
+            output = transcode_directory() / session_id
             output.mkdir(parents=True, exist_ok=False)
             media_file_id, path = self._file_path(entity_id, source.get("mediaFileId"))
             audio_index = profile.get("audioStreamId")

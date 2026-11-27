@@ -252,6 +252,7 @@ class MetadataMissingInspectionTest(unittest.TestCase):
             "title": "Example",
             "overview": "A complete overview",
             "images": [
+                {"type": "Primary", "url": "https://img/unavailable-preferred"},
                 {"type": "Primary", "url": "https://img/primary"},
                 {"type": "Backdrop", "url": "https://img/backdrop"},
             ],

@@ -511,11 +511,15 @@ class MetadataCache:
             return None
         try:
             payload = json.loads(rows[0][0])
-        except json.JSONDecodeError:
+        except (TypeError, json.JSONDecodeError):
             return None
-        if payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA:
+        if (
+            not isinstance(payload, dict)
+            or payload.get("_imageLanguageSchema") != IMAGE_LANGUAGE_SCHEMA
+        ):
             return None
-        payload["_stale"] = rows[0][1] <= iso_now()
+        expires_at = rows[0][1]
+        payload["_stale"] = not expires_at or expires_at <= iso_now()
         return payload
 
     def put(

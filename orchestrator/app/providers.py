@@ -936,12 +936,14 @@ class TMDBClient(ProviderClient):
                             height=image.get("height", 0),
                         )
                     )
-        if entity_type == "collection":
+        if entity_type in {"movie", "series", "season", "collection"}:
             present_types = {value["type"] for value in values}
             for image_type, key in (
                 (PRIMARY, "poster_path"),
                 (BACKDROP, "backdrop_path"),
             ):
+                if image_type == BACKDROP and entity_type != "collection":
+                    continue
                 path = payload.get(key)
                 if path and image_type not in present_types:
                     values.append(
@@ -3108,9 +3110,10 @@ class MetadataService:
             normalized_values = []
             for locale in missing:
                 try:
-                    normalized = client.normalize(
-                        entity_type, provider_id, payloads.get(locale, {})
-                    )
+                    payload = payloads.get(locale)
+                    if not isinstance(payload, dict):
+                        raise ValueError("provider omitted the requested locale")
+                    normalized = client.normalize(entity_type, provider_id, payload)
                 except Exception as error:
                     raise ProviderError(
                         f"{provider} {entity_type} {provider_id} {locale} normalization failed: {type(error).__name__}: {error}"

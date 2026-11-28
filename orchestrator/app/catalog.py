@@ -30,7 +30,12 @@ from app.metadata_services import (
 )
 from app.models.metadata import MetadataLanguageSettings, normalize_metadata_locale
 from app.providers import IMAGE_TYPES, PRIMARY_PROVIDER_BY_ENTITY
-from app.search_scoring import match_score, normalize_search_text, trigram_set
+from app.search_scoring import (
+    catalog_label_key,
+    match_score,
+    normalize_search_text,
+    trigram_set,
+)
 from fastapi import HTTPException
 
 logger = get_logger("catalog")
@@ -87,7 +92,7 @@ def _catalog_filter_keys(
     )
     rating_keys = sorted(
         {
-            value.strip().casefold()
+            catalog_label_key(value)
             for value in (official_ratings or [])
             if isinstance(value, str) and value.strip()
         }
@@ -100,7 +105,7 @@ def _catalog_filter_keys(
 def _catalog_named_filter_keys(values: list[str] | None) -> list[str]:
     keys = sorted(
         {
-            value.strip().casefold()
+            catalog_label_key(value)
             for value in (values or [])
             if isinstance(value, str) and value.strip()
         }
@@ -152,7 +157,7 @@ def _catalog_metadata_matches(
         if not item_genres.intersection(genre_keys):
             return False
     if rating_keys:
-        rating = str(metadata.get("officialRating") or "").strip().casefold()
+        rating = catalog_label_key(metadata.get("officialRating"))
         if rating not in rating_keys:
             return False
     if year_from is not None or year_to is not None:
@@ -187,14 +192,14 @@ def _catalog_metadata_matches(
             for value in values:
                 name = value.get("name") if isinstance(value, dict) else value
                 if isinstance(name, str) and name.strip():
-                    artist_names.add(name.strip().casefold())
+                    artist_names.add(catalog_label_key(name))
         album_artist = metadata.get("albumArtist")
         if isinstance(album_artist, str) and album_artist.strip():
-            artist_names.add(album_artist.strip().casefold())
+            artist_names.add(catalog_label_key(album_artist))
         if not artist_names.intersection(artist_keys):
             return False
     if album_artist_keys:
-        album_artist = str(metadata.get("albumArtist") or "").strip().casefold()
+        album_artist = catalog_label_key(metadata.get("albumArtist"))
         if album_artist not in album_artist_keys:
             return False
     if album_type_keys:
@@ -205,7 +210,7 @@ def _catalog_metadata_matches(
                 values = [values]
             if isinstance(values, list):
                 album_types.update(
-                    value.strip().casefold()
+                    catalog_label_key(value)
                     for value in values
                     if isinstance(value, str) and value.strip()
                 )
@@ -2151,7 +2156,7 @@ class Catalog:
         if rating_keys:
             placeholders = ",".join("?" for _ in rating_keys)
             clauses.append(
-                f"lower(trim(json_extract({projection_alias}.payload,'$.officialRating'))) "
+                f"catalog_label_key(json_extract({projection_alias}.payload,'$.officialRating')) "
                 f"IN ({placeholders})"
             )
             params.extend(rating_keys)
@@ -2221,25 +2226,25 @@ class Catalog:
             clauses.append(
                 "EXISTS (SELECT 1 FROM ("
                 + artist_values
-                + ") music_artist_filter WHERE lower(trim(music_artist_filter.name)) "
+                + ") music_artist_filter WHERE catalog_label_key(music_artist_filter.name) "
                 + f"IN ({placeholders}))"
             )
             params.extend(artist_keys)
         if album_artist_keys:
             placeholders = ",".join("?" for _ in album_artist_keys)
             clauses.append(
-                f"lower(trim(json_extract({projection_alias}.payload,'$.albumArtist'))) "
+                f"catalog_label_key(json_extract({projection_alias}.payload,'$.albumArtist')) "
                 f"IN ({placeholders})"
             )
             params.extend(album_artist_keys)
         if album_type_keys:
             placeholders = ",".join("?" for _ in album_type_keys)
             clauses.append(
-                "(lower(trim(json_extract("
-                f"{projection_alias}.payload,'$.albumType'))) IN ({placeholders}) OR "
+                "(catalog_label_key(json_extract("
+                f"{projection_alias}.payload,'$.albumType')) IN ({placeholders}) OR "
                 "EXISTS (SELECT 1 FROM json_each(COALESCE("
                 f"json_extract({projection_alias}.payload,'$.albumSecondaryTypes'),'[]')) album_type_filter "
-                f"WHERE lower(trim(CAST(album_type_filter.value AS TEXT))) IN ({placeholders})))"
+                f"WHERE catalog_label_key(album_type_filter.value) IN ({placeholders})))"
             )
             params.extend(album_type_keys)
             params.extend(album_type_keys)
@@ -2461,22 +2466,22 @@ class Catalog:
         for (value,) in rating_rows:
             label = str(value or "").strip()
             if label:
-                ratings_by_key.setdefault(label.casefold(), label)
+                ratings_by_key.setdefault(catalog_label_key(label), label)
         artists_by_key: dict[str, str] = {}
         for (value,) in artist_rows:
             label = str(value or "").strip()
             if label:
-                artists_by_key.setdefault(label.casefold(), label)
+                artists_by_key.setdefault(catalog_label_key(label), label)
         album_artists_by_key: dict[str, str] = {}
         for (value,) in album_artist_rows:
             label = str(value or "").strip()
             if label:
-                album_artists_by_key.setdefault(label.casefold(), label)
+                album_artists_by_key.setdefault(catalog_label_key(label), label)
         album_types_by_key: dict[str, str] = {}
         for (value,) in album_type_rows:
             label = str(value or "").strip()
             if label:
-                album_types_by_key.setdefault(label.casefold(), label)
+                album_types_by_key.setdefault(catalog_label_key(label), label)
         return {
             "genres": sorted(genres_by_key.values(), key=str.casefold),
             "officialRatings": sorted(ratings_by_key.values(), key=str.casefold),

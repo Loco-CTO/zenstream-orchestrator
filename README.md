@@ -45,13 +45,25 @@ Do not commit `.env` files or credentials. See `.env.example` for the complete l
 
 ## Quick start
 
-Requires Python 3.14 and FFmpeg/FFprobe. Create and activate a virtual environment, install the dependencies, and run:
+Requires Python 3.14 and FFmpeg/FFprobe. For the administrator dashboard, you also need Node.js 24+ and npm.
+
+Copy `.env.example` to `.env`, replace `SECRET_KEY` with a random secret, and set `METADATA_PATH` to a writable directory. To serve the dashboard from a source checkout, build it before starting the backend:
+
+```sh
+npm --prefix frontend ci --ignore-scripts --no-audit --no-fund
+npm --prefix frontend run build
+```
+
+Create and activate a virtual environment, install the backend dependencies, and start Orchestrator:
 
 ```sh
 python -m venv .venv
+# Activate .venv before running the next two commands.
 python -m pip install -r requirements.txt
 python orchestrator/init.py
 ```
+
+With the port from `.env.example`, open the dashboard at `http://127.0.0.1:9088/web/`. The backend can run without the frontend build, but `/web/` will return 503 until the dashboard assets are built and the backend is restarted.
 
 ## Deployment
 

@@ -15,6 +15,11 @@ def normalize_search_text(value: object) -> str:
     )
 
 
+def catalog_label_key(value: object) -> str:
+    """Case-fold an exact facet label without dropping its punctuation."""
+    return str(value or "").strip().casefold()
+
+
 def trigram_set(value: object) -> set[str]:
     """Return unique boundary-padded trigrams for a normalized value."""
     normalized = normalize_search_text(value)
@@ -84,7 +89,10 @@ def match_score(query: object, candidate: object) -> float:
 
 
 def register_sqlite_functions(dbapi_connection) -> None:
-    """Register search functions on every SQLite connection."""
+    """Register catalog functions on every SQLite connection."""
+    dbapi_connection.create_function(
+        "catalog_label_key", 1, catalog_label_key, deterministic=True
+    )
     dbapi_connection.create_function(
         "catalog_match_score", 2, match_score, deterministic=True
     )

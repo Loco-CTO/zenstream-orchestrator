@@ -1,5 +1,7 @@
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import Mock
 
 from app.catalog import Catalog
@@ -8,7 +10,11 @@ from app.database import DatabaseHandler
 
 class MusicCatalogPageTest(unittest.TestCase):
     def setUp(self):
-        self.db = DatabaseHandler("sqlite", {}, ":memory:")
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.db = DatabaseHandler(
+            "sqlite", {}, str(Path(directory.name) / "orchestrator.db")
+        )
         for statement in (
             "CREATE TABLE libraries(id TEXT PRIMARY KEY,name TEXT,type TEXT,scan_state TEXT,last_scan_finished_at TEXT,created_at TEXT)",
             "CREATE TABLE library_entities(id TEXT PRIMARY KEY,library_id TEXT,parent_id TEXT,entity_type TEXT,relative_path TEXT,season_number INTEGER,episode_number INTEGER,episode_end_number INTEGER,disc_number INTEGER,track_number INTEGER,created_at TEXT,updated_at TEXT)",
@@ -223,6 +229,51 @@ class MusicCatalogPageTest(unittest.TestCase):
         self.assertEqual([item["id"] for item in result["items"]], ["release-b"])
         catalog._music_release_rows.assert_not_called()
         catalog._music_album_value.assert_called_once()
+
+    def test_displayed_facets_match_unicode_names_in_the_album_read_model(self):
+        metadata = {
+            "title": "Beta",
+            "artists": [{"name": "Édith Piaf"}],
+            "contributingArtists": ["STRAẞE Quartet"],
+            "albumArtist": "Ökad Takt",
+            "albumType": "Édition",
+            "albumSecondaryTypes": ["RéÉDITION"],
+            "officialRating": "Âge 12",
+        }
+        self.db.execute(
+            "UPDATE catalog_item_projection SET payload=? WHERE entity_id='release-b'",
+            (json.dumps(metadata),),
+        )
+        catalog = Catalog.__new__(Catalog)
+        catalog.db = self.db
+        catalog.require_library = Mock(return_value={"type": "music"})
+        catalog._read_model_ready = Mock(return_value=True)
+        catalog._seed_hydration_rows = Mock()
+        catalog._music_album_value = Mock(
+            side_effect=lambda _user, row, _language, _dates, _children: {"id": row[0]}
+        )
+
+        options = catalog.library_filter_options(
+            "user", "en", "music", music_albums=True
+        )
+        for parameter, facet, label in (
+            ("artists", "artists", "Édith Piaf"),
+            ("artists", "artists", "STRAẞE Quartet"),
+            ("artists", "artists", "Ökad Takt"),
+            ("album_artists", "albumArtists", "Ökad Takt"),
+            ("album_types", "albumTypes", "Édition"),
+            ("album_types", "albumTypes", "RéÉDITION"),
+            ("official_ratings", "officialRatings", "Âge 12"),
+        ):
+            with self.subTest(parameter=parameter, label=label):
+                self.assertIn(label, options[facet])
+                result = catalog.music_albums(
+                    "user", "en", "music", **{parameter: [label]}
+                )
+                self.assertEqual(result["total"], 1)
+                self.assertEqual(result["items"], [{"id": "release-b"}])
+        result = catalog.music_albums("user", "en", "music", artists=["Édith-Piaf"])
+        self.assertEqual(result["total"], 0)
 
 
 if __name__ == "__main__":
